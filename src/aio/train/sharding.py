@@ -76,7 +76,8 @@ def put_batch(batch: np.ndarray, sharding):
     contributes only the rows that belong to its own devices."""
     if not is_multihost():
         return jax.device_put(batch, sharding)
-    return jax.make_array_from_callback(batch.shape, sharding, lambda idx: batch[idx])
+    # batch may be one array or a dict of arrays (SFT / DPO)
+    return jax.tree.map(lambda x: jax.make_array_from_callback(x.shape, sharding, lambda idx: x[idx]), batch)
 
 
 def to_host(tree):

@@ -54,6 +54,9 @@ class TrainConfig:
     eval_batches: int = 20
     ckpt_every: int = 200
     keep_ckpts: int = 3
+    objective: str = "lm"          # "lm" (pretraining and SFT) or "dpo"
+    dpo_beta: float = 0.1
+    init_from: str | None = None   # checkpoints folder of an earlier run: start from its newest weights
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
 
@@ -68,39 +71,60 @@ class TrainConfig:
         return cls(model=model, optim=optim, **d)
 
 
-def make_train_step(cfg: TrainConfig):
-    mcfg, ocfg, A = cfg.model, cfg.optim, cfg.grad_accum
+def load_dataset(path: str):
+    """Token shards (a folder with index.json), or a post-training .npz (SFT or DPO pairs)."""
+    p = Path(path)
+    if p.suffix == ".npz":
+        from ..post.chat import ConversationDataset, PairDataset
 
-    def step(params, opt_state, batch):
-        x, y = batch[:, :-1], batch[:, 1:]
-        mask = jnp.ones(x.shape, jnp.float32)
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        kind = str(np.load(p)["kind"])
+        return ConversationDataset(p) if kind == "sft" else PairDataset(p)
+    return TokenDataset(p)
+
+
+def _objective(cfg: TrainConfig):
+    from ..post.objectives import OBJECTIVES
+
+    if cfg.objective not in OBJECTIVES:
+        raise ValueError(f"unknown objective {cfg.objective!r}; choose from {sorted(OBJECTIVES)}")
+    fn = OBJECTIVES[cfg.objective]
+    return lambda params, batch, ref: fn(params, batch, cfg.model, ref, beta=cfg.dpo_beta)
+
+
+def make_train_step(cfg: TrainConfig):
+    ocfg, A = cfg.optim, cfg.grad_accum
+    objective = _objective(cfg)
+    grad_fn = jax.value_and_grad(objective, has_aux=True)
+
+    def step(params, opt_state, batch, ref):
         if A == 1:
-            (loss, aux), grads = grad_fn(params, x, y, mask, mcfg)
+            (loss, metrics), grads = grad_fn(params, batch, ref)
         else:
             # Average gradients over A micro-batches without holding all their activations.
-            mb = lambda a: a.reshape(A, a.shape[0] // A, *a.shape[1:])  # noqa: E731
+            mb = jax.tree.map(lambda a: a.reshape(A, a.shape[0] // A, *a.shape[1:]), batch)
 
-            def body(carry, xs):
-                g_sum, l_sum, c_sum = carry
-                (l, aux), g = grad_fn(params, *xs, mcfg)
-                return (jax.tree.map(jnp.add, g_sum, g), l_sum + l, c_sum + aux["ce"]), None
+            def body(carry, micro):
+                g_sum, l_sum, m_sum = carry
+                (l, m), g = grad_fn(params, micro, ref)
+                return (jax.tree.map(jnp.add, g_sum, g), l_sum + l, jax.tree.map(jnp.add, m_sum, m)), None
 
             zeros = jax.tree.map(jnp.zeros_like, params)
-            (g_sum, l_sum, c_sum), _ = jax.lax.scan(body, (zeros, 0.0, 0.0), (mb(x), mb(y), mb(mask)))
+            _, m_shape = jax.eval_shape(objective, params, jax.tree.map(lambda a: a[0], mb), ref)
+            m_zero = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), m_shape)
+            (g_sum, l_sum, m_sum), _ = jax.lax.scan(body, (zeros, 0.0, m_zero), mb)
             grads = jax.tree.map(lambda g: g / A, g_sum)
-            loss, aux = l_sum / A, {"ce": c_sum / A}
+            loss, metrics = l_sum / A, jax.tree.map(lambda m: m / A, m_sum)
         params, opt_state, stats = adamw_update(params, grads, opt_state, ocfg)
-        return params, opt_state, {"loss": loss, "ce": aux["ce"], **stats}
+        return params, opt_state, {"loss": loss, **metrics, **stats}
 
     return step
 
 
 def make_eval_step(cfg: TrainConfig):
-    def step(params, batch):
-        x, y = batch[:, :-1], batch[:, 1:]
-        _, aux = loss_fn(params, x, y, jnp.ones(x.shape, jnp.float32), cfg.model)
-        return aux["ce"]
+    objective = _objective(cfg)
+
+    def step(params, batch, ref):
+        return objective(params, batch, ref)[0]
 
     return step
 
@@ -149,10 +173,10 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     if main:
         (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
-    data = TokenDataset(cfg.data_dir)
+    data = load_dataset(cfg.data_dir)
     if data.vocab_size > cfg.model.vocab_size:
         raise ValueError(f"data vocab {data.vocab_size} > model vocab {cfg.model.vocab_size}")
-    val = TokenDataset(cfg.val_dir) if cfg.val_dir else None
+    val = load_dataset(cfg.val_dir) if cfg.val_dir else None
 
     devices = jax.devices()
     n_dev = len(devices)
@@ -163,6 +187,21 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     batch_sharding = make_batch_sharding(mesh)
 
     params = init_params(cfg.model, jax.random.PRNGKey(cfg.seed))
+    ref = None
+    if cfg.init_from:
+        # Start from (and, for DPO, compare against) an earlier run's newest weights.
+        src = checkpoint.latest_step(cfg.init_from) if main else None
+        if main and src is None:
+            raise FileNotFoundError(f"no checkpoints in {cfg.init_from}")
+        if main:
+            loaded, _ = checkpoint.restore(cfg.init_from, src, {"params": params, "opt": init_opt_state(params)})
+            params = loaded["params"]
+        params = broadcast_from_main(jax.device_get(params))
+        log(f"initialised from {cfg.init_from} (step {src})")
+        if cfg.objective == "dpo":
+            ref = params
+    if cfg.objective == "dpo" and ref is None:
+        raise ValueError("objective 'dpo' needs init_from (the SFT run to compare against)")
     state = {"params": params, "opt": init_opt_state(params)}
     last = checkpoint.latest_step(ckpt_dir) if main else None
     last = int(broadcast_from_main(np.array(-1 if last is None else last)))
@@ -176,14 +215,17 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     shard = state_shardings(state, mesh, cfg.sharding)
     state = put_global(state, shard)
 
+    if ref is not None:
+        ref = put_global(ref, shard["params"])
+    ref_shard = shard["params"] if ref is not None else None
     train_step = jax.jit(make_train_step(cfg), donate_argnums=(0, 1),
-                         in_shardings=(shard["params"], shard["opt"], batch_sharding),
+                         in_shardings=(shard["params"], shard["opt"], batch_sharding, ref_shard),
                          out_shardings=(shard["params"], shard["opt"], replicated))
-    eval_step = jax.jit(make_eval_step(cfg), in_shardings=(shard["params"], batch_sharding))
+    eval_step = jax.jit(make_eval_step(cfg), in_shardings=(shard["params"], batch_sharding, ref_shard))
 
     def evaluate(params) -> float:
         # Fixed held-out batches (seed is independent of the training seed).
-        losses = [eval_step(params, put_batch(val.batch(i, cfg.batch_size, cfg.seq_len, seed=10_000), batch_sharding))
+        losses = [eval_step(params, put_batch(val.batch(i, cfg.batch_size, cfg.seq_len, seed=10_000), batch_sharding), ref)
                   for i in range(cfg.eval_batches)]
         return float(np.mean([float(x) for x in losses]))
 
@@ -204,7 +246,7 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
             t0, t_tokens = time.time(), 0
             while step < cfg.steps:
                 batch = put_batch(data.batch(step, cfg.batch_size, cfg.seq_len, cfg.seed), batch_sharding)
-                state["params"], state["opt"], m = train_step(state["params"], state["opt"], batch)
+                state["params"], state["opt"], m = train_step(state["params"], state["opt"], batch, ref)
                 step += 1
                 t_tokens += tokens_per_step
 
@@ -215,8 +257,9 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
                            "tokens_per_s": round(t_tokens / max(dt, 1e-9)), "tokens_seen": step * tokens_per_step}
                     if not math.isfinite(m["loss"]):
                         raise FloatingPointError(f"loss became {m['loss']} at step {step}")
-                    log(f"step {step:>6} | loss {m['ce']:.4f} | lr {m['lr']:.2e} | grad norm {m['grad_norm']:.2f} "
-                        f"| {rec['tokens_per_s']:,} tok/s")
+                    extra = "".join(f" | {k} {m[k]:.3f}" for k in ("reward_acc", "margin") if k in m)
+                    log(f"step {step:>6} | loss {m['ce']:.4f} | lr {m['lr']:.2e} | grad norm {m['grad_norm']:.2f}"
+                        f"{extra} | {rec['tokens_per_s']:,} tok/s")
                     metrics_f.write(json.dumps(rec) + "\n")
                     metrics_f.flush()
                     last_metrics = rec
