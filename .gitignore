@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Datasets, tokenizers trained on them, checkpoints and logs: too big for git/OneDrive
+/data/
+/raw/
+/checkpoints/
+/runs/
+*.jsonl
+*.jsonl.gz
+*.tmp
+*.npy
+*.bin
