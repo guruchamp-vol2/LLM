@@ -25,13 +25,14 @@ def main() -> None:
     ap.add_argument("--budgets", type=float, nargs="+", required=True, help="compute budgets in FLOPs (6 N D)")
     ap.add_argument("--widths", type=int, nargs="+", default=[64, 96, 128, 192, 256])
     ap.add_argument("--min-steps", type=int, default=50)
+    ap.add_argument("--max-tokens", type=float, help="skip runs needing more tokens than this (e.g. dataset size)")
     ap.add_argument("--flops-per-s", type=float, default=1.2e11,
                     help="measured training speed (all FLOPs incl. embeddings) for the time estimate")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     base = TrainConfig.from_dict(json.loads(Path(args.config).read_text(encoding="utf-8")))
-    runs = plan(base, args.budgets, args.widths, args.out, args.min_steps)
+    runs = plan(base, args.budgets, args.widths, args.out, args.min_steps, args.max_tokens)
     total_h = 0.0
     print(f"{len(runs)} runs:")
     for r in runs:

@@ -30,11 +30,13 @@ def shape_for(width: int, vocab_size: int, seq_len: int, head_dim: int = 32) -> 
 
 
 def plan(base: TrainConfig, budgets: list[float], widths: list[int], out_dir: str | Path,
-         min_steps: int = 50) -> list[TrainConfig]:
+         min_steps: int = 50, max_tokens: float | None = None) -> list[TrainConfig]:
     """For each compute budget (FLOPs) and width, set the step count so 6 N D = budget.
 
     N counts non-embedding parameters (the usual choice at small scale, where embeddings
-    would otherwise dominate). Runs needing fewer than min_steps steps are left out.
+    would otherwise dominate). Runs needing fewer than min_steps steps are left out, and so
+    are runs needing more than max_tokens (e.g. the dataset size, to avoid repeating data,
+    which would bend the fitted curves).
     """
     out = Path(out_dir)
     tokens_per_step = base.batch_size * base.seq_len
@@ -44,7 +46,7 @@ def plan(base: TrainConfig, budgets: list[float], widths: list[int], out_dir: st
             m = shape_for(w, base.model.vocab_size, base.seq_len)
             n = non_embedding_params(m)
             steps = int(c / (6 * n * tokens_per_step))
-            if steps < min_steps:
+            if steps < min_steps or (max_tokens is not None and steps * tokens_per_step > max_tokens):
                 continue
             warm = max(10, steps // 20)
             # Smaller models tolerate larger learning rates.
