@@ -3,6 +3,7 @@
 Pass 1 (streaming, per document):
     HTML extraction -> URL dedup -> URL safety -> quality filters -> text safety
     -> PII redaction -> exact dedup -> near-duplicate dedup (MinHash)
+    -> educational-quality score (optional; stored as "quality", optionally filtered)
 Pass 2 (corpus-wide):
     count lines across all documents, strip lines repeated in many documents
     (headers, footers, menus), then re-check length.
@@ -22,6 +23,7 @@ from .extract import html_to_text
 from .filters import QualityConfig, SafetyConfig, quality_filter, text_safety_filter, url_filter
 from .io import ShardWriter, read_jsonl
 from .pii import redact_pii
+from .quality import QualityScorer
 
 
 @dataclass
@@ -32,6 +34,11 @@ class PipelineConfig:
     # a line in more than this many documents counts as boilerplate
     line_max_docs: int = 3
     docs_per_shard: int = 50_000
+    # path to a trained QualityScorer (scripts/train_quality.py); None = don't score
+    quality_model: str | None = None
+    # drop documents scoring below this; None = keep all and just store the score,
+    # so the cut-off can be chosen later without re-running the pipeline
+    min_quality: float | None = None
 
 
 class Pipeline:
@@ -41,6 +48,9 @@ class Pipeline:
         self.urls = ExactDeduper()
         self.exact = ExactDeduper()
         self.near = MinHashDeduper() if self.cfg.near_dedup else None
+        self.scorer = QualityScorer.load(self.cfg.quality_model) if self.cfg.quality_model else None
+        if self.cfg.min_quality is not None and self.scorer is None:
+            raise ValueError("min_quality needs quality_model")
 
     def _drop(self, reason: str) -> None:
         self.stats[f"removed:{reason}"] += 1
@@ -72,8 +82,16 @@ class Pipeline:
         if self.near is not None and self.near.is_dup(text):
             return self._drop("dup_near")
 
+        quality = None
+        if self.scorer is not None:
+            quality = round(self.scorer.score(text), 3)
+            if self.cfg.min_quality is not None and quality < self.cfg.min_quality:
+                return self._drop("low_quality_score")
+
         self.stats["kept_pass1"] += 1
         out = {"text": text}
+        if quality is not None:
+            out["quality"] = quality
         if url:
             out["url"] = url
         if title:

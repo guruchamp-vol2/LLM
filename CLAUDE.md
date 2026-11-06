@@ -20,10 +20,12 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 
 ## Status (2026-11-05)
 - Stage 1, tokenizer (`src/aio/tokenizer/bpe.py`): done, tests pass.
-- Stage 2, data pipeline (`src/aio/data/`): extraction, filters, PII, dedup and the pipeline are written. All 18 tests pass.
+- Stage 2, data pipeline (`src/aio/data/`): extraction, filters, PII, dedup and the pipeline are written. All 23 tests pass.
   - Known limitation: valid-looking version strings such as `1.2.3.4` are redacted as IPs.
-- Next: a quality classifier and domain classification (remaining parts of stage 2), then the JAX transformer (stage 3).
+  - Quality scorer (`quality.py`): done. A linear model over hashed words and word pairs (NumPy), trained on the free FineWeb-Edu annotations (467k pages graded 0-5, in `C:\llm-data\edu-annotations`). The model is at `C:\llm-data\models\quality.npz`, about 8 minutes to train. On held-out pages: Pearson 0.73, F1 0.60 at finding grade 3+ pages, with the tuned cut-off of 2.1 stored in the model. The pipeline stores a `quality` field per document, and `--min-quality` filters on it. To improve it later, rescore with our own transformer once stage 3 exists.
+- Next: domain classification (the last part of stage 2), then the JAX transformer (stage 3).
 
 ## Commands
 - Tests: `python -m pytest -q tests`
-- Clean data: `python scripts/run_pipeline.py --input "raw/*.jsonl.gz" --output <out_dir>`
+- Clean data: `python scripts/run_pipeline.py --input "raw/*.jsonl.gz" --output <out_dir>` (add `--quality-model C:/llm-data/models/quality.npz` to score pages)
+- Train quality scorer: `python scripts/train_quality.py --data "C:/llm-data/edu-annotations/*.parquet" --out C:/llm-data/models/quality.npz`

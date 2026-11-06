@@ -26,13 +26,16 @@ def main() -> None:
     ap.add_argument("--multilingual", action="store_true", help="disable the English stop-word check")
     ap.add_argument("--blocked-domains", help="file with one blocked domain per line")
     ap.add_argument("--no-near-dedup", action="store_true")
+    ap.add_argument("--quality-model", help="trained quality scorer (.npz) from scripts/train_quality.py")
+    ap.add_argument("--min-quality", type=float, help="drop documents scoring below this")
     args = ap.parse_args()
 
     inputs = sorted(glob.glob(args.input))
     if not inputs:
         sys.exit(f"no files match {args.input}")
 
-    cfg = PipelineConfig(near_dedup=not args.no_near_dedup)
+    cfg = PipelineConfig(near_dedup=not args.no_near_dedup, quality_model=args.quality_model,
+                         min_quality=args.min_quality)
     if args.multilingual:
         cfg.quality.require_stop_words = False
     if args.blocked_domains:
