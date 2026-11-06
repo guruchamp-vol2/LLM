@@ -1,0 +1,30 @@
+{
+  "_comment": "DPO of the laptop SFT model on UltraFeedback preference pairs (up to 512 tokens).",
+  "data_dir": "C:/llm-data/chat/dpo-train.npz",
+  "val_dir": "C:/llm-data/chat/dpo-val.npz",
+  "out_dir": "C:/llm-data/runs/laptop-dpo",
+  "init_from": "C:/llm-data/runs/laptop-sft/checkpoints",
+  "objective": "dpo",
+  "dpo_beta": 0.1,
+  "seq_len": 512,
+  "batch_size": 8,
+  "steps": 400,
+  "log_every": 20,
+  "eval_every": 100,
+  "eval_batches": 10,
+  "ckpt_every": 100,
+  "model": {
+    "vocab_size": 8192,
+    "d_model": 256,
+    "n_layers": 6,
+    "n_heads": 4,
+    "n_kv_heads": 2,
+    "max_seq_len": 512
+  },
+  "optim": {
+    "lr": 0.00005,
+    "warmup_steps": 20,
+    "total_steps": 400,
+    "weight_decay": 0.0
+  }
+}
