@@ -37,7 +37,12 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
   - `model/generate.py`: KV-cache sampling (temperature, top-k).
   - Single-host only so far. Multi-host TPU pods need `jax.distributed.initialize()` and per-host data slices.
   - First laptop run (`configs/laptop-tiny.json`): 6.5M params, vocab 8192, 60k FineWeb pages cleaned to 57k (49M train tokens), 3000 steps x 8192 tokens at about 3.8k tok/s (about 2 hours). Data: `C:/llm-data/tokens-sample`, run: `C:/llm-data/runs/laptop-tiny`, tokenizer: `C:/llm-data/tokenizer-8k.json`.
-- Next: stage 5 (scaling laws: sweep small models on the laptop, fit loss vs size/tokens), and getting the code ready for TPU (multi-host, bf16, a TPU setup guide that avoids paid storage/egress).
+    - Result: validation loss 4.42 (perplexity 83). Fluent-looking English that stays loosely on topic but has no real meaning. Samples are in `C:/llm-data/runs/laptop-tiny/samples.txt`.
+- Stage 5, scaling laws (`src/aio/scaling/`, `scripts/sweep.py`): tools done and tested. `fit_parametric` fits L(N,D) = E + A/N^a + B/D^b; `fit_isoflop` gives the best N per budget; `plan`/`run_all` run a resumable size-by-budget sweep with `--dry-run` time estimates.
+  - Sweep v1 (2026-11-06, `C:/llm-data/sweeps/laptop`, 15 runs, budgets 3e12-1e14, batch 32x256): **not usable.** The smallest model won at every budget, because larger models got only 77-350 optimizer steps (step-limited, not compute-limited). The fit gave E=0 and absurd tokens/param. Lesson: small budgets need small batches and a minimum step count.
+  - Sweep v2 (`C:/llm-data/sweeps/laptop-v2`): batch 8, at least 400 steps, budgets 1e13/3e13/1e14, widths 64-256, no repeated data (`--max-tokens 49e6`). Started 04:05 on 2026-11-06, about 4 hours. Re-run the same command to resume or to print the fits (see Commands).
+  - The laptop only reaches tiny models (<6M non-embedding params), where the 8k embedding dominates. A sweep that sets the real model size has to run on the TPUs.
+- Next: check sweep v2; get the code ready for TPU (multi-host `jax.distributed`, bf16 run, a TPU setup guide that avoids paid storage/egress); then a sweep on TPU to choose the final size.
 
 ## Commands
 - Tests: `python -m pytest -q tests`
@@ -46,5 +51,6 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 - Train tokenizer: `python scripts/train_tokenizer.py --input "<clean>/final/*.jsonl.gz" --vocab-size 32000 --out <tok.json>`
 - Tokenize: `python scripts/tokenize_data.py --input "<clean>/final/*.jsonl.gz" --tokenizer <tok.json> --out <tokens_dir>` (writes train/ and val/)
 - Train model: `python scripts/train.py --config configs/laptop-tiny.json [--set steps=100 --set model.d_model=128]` (re-run the same command to resume)
+- Scaling sweep v2: `python scripts/sweep.py --config configs/laptop-tiny.json --out C:/llm-data/sweeps/laptop-v2 --budgets 1e13 3e13 1e14 --widths 64 96 128 192 256 --batch-size 8 --min-steps 400 --max-tokens 49e6` (add `--dry-run` to see the plan only)
 - Generate: `python scripts/generate.py --run <out_dir> --tokenizer <tok.json> --prompt "Once upon a time"`
 - Train quality scorer: `python scripts/train_quality.py --data "C:/llm-data/edu-annotations/*.parquet" --out C:/llm-data/models/quality.npz`

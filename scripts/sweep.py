@@ -28,10 +28,20 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=float, help="skip runs needing more tokens than this (e.g. dataset size)")
     ap.add_argument("--flops-per-s", type=float, default=1.2e11,
                     help="measured training speed (all FLOPs incl. embeddings) for the time estimate")
+    ap.add_argument("--batch-size", type=int, help="override the config's batch size (sequences per step)")
+    ap.add_argument("--seq-len", type=int, help="override the config's sequence length")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    base = TrainConfig.from_dict(json.loads(Path(args.config).read_text(encoding="utf-8")))
+    d = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # Small budgets need small batches, or larger models get too few optimizer steps and
+    # lose for lack of steps rather than lack of compute.
+    if args.batch_size:
+        d["batch_size"] = args.batch_size
+    if args.seq_len:
+        d["seq_len"] = args.seq_len
+        d.setdefault("model", {})["max_seq_len"] = args.seq_len
+    base = TrainConfig.from_dict(d)
     runs = plan(base, args.budgets, args.widths, args.out, args.min_steps, args.max_tokens)
     total_h = 0.0
     print(f"{len(runs)} runs:")
