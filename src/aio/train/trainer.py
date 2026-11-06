@@ -4,8 +4,8 @@
   function of (seed, step), so a resumed run continues exactly as if never interrupted.
 - On SIGTERM or Ctrl+C (e.g. a preemptible TPU being reclaimed) it saves a checkpoint
   before exiting.
-- Data parallel over all local devices: each batch is split across devices, the parameters
-  are copied to each, and XLA averages the gradients. (FSDP sharding comes next.)
+- Runs on all local devices. sharding="dp" copies the weights to every device and splits
+  the batch; sharding="fsdp" also splits the weights and optimizer state (see sharding.py).
 - Logs to stdout and out_dir/metrics.jsonl; evaluates on held-out tokens every eval_every steps.
 """
 
@@ -22,11 +22,12 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from ..data.tokens import TokenDataset
 from ..model.transformer import ModelConfig, init_params, loss_fn
 from . import checkpoint
+from .sharding import batch_sharding as make_batch_sharding, make_mesh, state_shardings
 from .optim import OptimConfig, adamw_update, init_opt_state
 
 
@@ -38,6 +39,7 @@ class TrainConfig:
     seq_len: int = 512
     batch_size: int = 16           # sequences per optimizer step (all devices together)
     grad_accum: int = 1            # split each batch into this many sequential micro-batches
+    sharding: str = "dp"           # "dp" (copy weights to each device) or "fsdp" (split them)
     steps: int = 1000
     seed: int = 0
     log_every: int = 10
@@ -138,10 +140,9 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     n_dev = len(devices)
     if cfg.batch_size % (n_dev * cfg.grad_accum):
         raise ValueError(f"batch_size {cfg.batch_size} must divide by devices x grad_accum = {n_dev * cfg.grad_accum}")
-    mesh = Mesh(np.array(devices), ("data",))
+    mesh = make_mesh(devices)
     replicated = NamedSharding(mesh, P())
-    # With grad_accum, keep micro-batches whole per device: split rows across devices.
-    batch_sharding = NamedSharding(mesh, P("data"))
+    batch_sharding = make_batch_sharding(mesh)
 
     params = init_params(cfg.model, jax.random.PRNGKey(cfg.seed))
     state = {"params": params, "opt": init_opt_state(params)}
@@ -150,12 +151,13 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
         state, meta = checkpoint.restore(ckpt_dir, last, state)
         start = meta["step"]
         log(f"resumed from step {start}")
-    state = jax.device_put(state, replicated)
+    shard = state_shardings(state, mesh, cfg.sharding)
+    state = jax.device_put(state, shard)
 
     train_step = jax.jit(make_train_step(cfg), donate_argnums=(0, 1),
-                         in_shardings=(replicated, replicated, batch_sharding),
-                         out_shardings=(replicated, replicated, replicated))
-    eval_step = jax.jit(make_eval_step(cfg), in_shardings=(replicated, batch_sharding))
+                         in_shardings=(shard["params"], shard["opt"], batch_sharding),
+                         out_shardings=(shard["params"], shard["opt"], replicated))
+    eval_step = jax.jit(make_eval_step(cfg), in_shardings=(shard["params"], batch_sharding))
 
     def evaluate(params) -> float:
         # Fixed held-out batches (seed is independent of the training seed).

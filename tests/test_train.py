@@ -134,7 +134,8 @@ def test_grad_accum_matches_full_batch(tmp_path):
         np.testing.assert_allclose(np.asarray(x), np.asarray(y), atol=1e-5)
 
 
-def test_data_parallel_on_4_fake_devices(tmp_path):
+@pytest.mark.parametrize("mode", ["dp", "fsdp"])
+def test_data_parallel_on_4_fake_devices(tmp_path, mode):
     """Same run on 1 and on 4 (simulated) devices ends with the same weights."""
     _cfg(tmp_path)  # writes data
     script = f"""
@@ -144,7 +145,10 @@ from pathlib import Path
 from test_train import _cfg
 from aio.train import train
 assert len(jax.devices()) == 4
-r = train(_cfg(Path({str(tmp_path)!r}), out_dir={str(tmp_path / 'dp')!r}, steps=5), log=lambda s: None)
+r = train(_cfg(Path({str(tmp_path)!r}), out_dir={str(tmp_path / 'dp')!r}, steps=5, sharding={mode!r}), log=lambda s: None)
+if {mode!r} == "fsdp":
+    spec = r['state']['params']['layers']['w_gate'].sharding.spec
+    assert 'data' in tuple(spec), spec  # really split across devices
 np.save({str(tmp_path / 'dp.npy')!r}, np.asarray(r['state']['params']['embed']))
 """
     env = {**os.environ, "XLA_FLAGS": "--xla_force_host_platform_device_count=4", "JAX_PLATFORMS": "cpu"}
@@ -170,3 +174,16 @@ def test_trained_model_continues_counting(tmp_path):
                 log=lambda s: None)
     out = generate(res["state"]["params"], TINY, [5, 6, 7, 8, 9], 5, jax.random.PRNGKey(0), temperature=0)
     assert out == [10, 11, 12, 13, 14]
+
+
+def test_fsdp_specs():
+    from aio.train.sharding import make_mesh, state_shardings
+    mesh = make_mesh(jax.devices()[:1])
+    params = init_params(TINY, jax.random.PRNGKey(0))
+    sh = state_shardings(params, mesh, "fsdp")  # one device: everything stays whole
+    assert all(len(x.spec) == 0 for x in jax.tree.leaves(sh, is_leaf=lambda v: hasattr(v, "spec")))
+    from aio.train.sharding import _fsdp_spec
+    from jax.tree_util import DictKey
+    assert _fsdp_spec((DictKey("layers"), DictKey("wq")), (8, 32, 64), 4) == jax.sharding.PartitionSpec(None, None, "data")
+    assert _fsdp_spec((DictKey("embed"),), (100, 32), 4) == jax.sharding.PartitionSpec("data", None)
+    assert _fsdp_spec((DictKey("layers"), DictKey("attn_norm")), (8, 30), 4) == jax.sharding.PartitionSpec()
