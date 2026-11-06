@@ -3,3 +3,5 @@ numpy
 regex
 pytest
 pyarrow
+jax[cpu]   # on TPU machines: jax[tpu]
+optax
