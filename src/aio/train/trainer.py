@@ -4,8 +4,12 @@
   function of (seed, step), so a resumed run continues exactly as if never interrupted.
 - On SIGTERM or Ctrl+C (e.g. a preemptible TPU being reclaimed) it saves a checkpoint
   before exiting.
-- Runs on all local devices. sharding="dp" copies the weights to every device and splits
-  the batch; sharding="fsdp" also splits the weights and optimizer state (see sharding.py).
+- Runs on all devices. sharding="dp" copies the weights to every device and splits the
+  batch; sharding="fsdp" also splits the weights and optimizer state (see sharding.py).
+- Multi-host (TPU pods): set distributed=True and start the same command on every host.
+  Only process 0 logs and writes checkpoints, to its local disk; on resume it sends the
+  checkpoint to the other hosts, so no shared (paid) storage is needed. Every host needs
+  its own copy of the token shards.
 - Logs to stdout and out_dir/metrics.jsonl; evaluates on held-out tokens every eval_every steps.
 """
 
@@ -14,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -27,7 +32,8 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from ..data.tokens import TokenDataset
 from ..model.transformer import ModelConfig, init_params, loss_fn
 from . import checkpoint
-from .sharding import batch_sharding as make_batch_sharding, make_mesh, state_shardings
+from .sharding import (any_process, batch_sharding as make_batch_sharding, broadcast_from_main, make_mesh,
+                       put_batch, put_global, state_shardings, to_host)
 from .optim import OptimConfig, adamw_update, init_opt_state
 
 
@@ -40,6 +46,7 @@ class TrainConfig:
     batch_size: int = 16           # sequences per optimizer step (all devices together)
     grad_accum: int = 1            # split each batch into this many sequential micro-batches
     sharding: str = "dp"           # "dp" (copy weights to each device) or "fsdp" (split them)
+    distributed: bool = False      # True on multi-host TPU pods: call jax.distributed.initialize()
     steps: int = 1000
     seed: int = 0
     log_every: int = 10
@@ -55,7 +62,7 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrainConfig":
-        d = dict(d)
+        d = {k: v for k, v in d.items() if not k.startswith("_")}  # "_comment" etc.
         model = ModelConfig(**d.pop("model", {}))
         optim = OptimConfig(**d.pop("optim", {}))
         return cls(model=model, optim=optim, **d)
@@ -98,6 +105,9 @@ def make_eval_step(cfg: TrainConfig):
     return step
 
 
+_distributed_ready = False
+
+
 class _StopFlag:
     """Set by SIGTERM / Ctrl+C so the loop can save and exit cleanly."""
 
@@ -126,10 +136,18 @@ class _StopFlag:
 
 def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     """Run (or resume) training. stop_after: return after this many steps of this call (tests)."""
+    global _distributed_ready
+    if cfg.distributed and not _distributed_ready:
+        jax.distributed.initialize()  # TPU VMs find their peers automatically
+        _distributed_ready = True
+    main = jax.process_index() == 0
+    if not main:
+        log = lambda *a, **k: None  # noqa: E731
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ckpt_dir = out / "checkpoints"
-    (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+    if main:
+        (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     data = TokenDataset(cfg.data_dir)
     if data.vocab_size > cfg.model.vocab_size:
@@ -146,13 +164,17 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
 
     params = init_params(cfg.model, jax.random.PRNGKey(cfg.seed))
     state = {"params": params, "opt": init_opt_state(params)}
+    last = checkpoint.latest_step(ckpt_dir) if main else None
+    last = int(broadcast_from_main(np.array(-1 if last is None else last)))
     start = 0
-    if (last := checkpoint.latest_step(ckpt_dir)) is not None:
-        state, meta = checkpoint.restore(ckpt_dir, last, state)
-        start = meta["step"]
+    if last >= 0:
+        if main:
+            state, meta = checkpoint.restore(ckpt_dir, last, state)
+        state = broadcast_from_main(jax.device_get(state))
+        start = last
         log(f"resumed from step {start}")
     shard = state_shardings(state, mesh, cfg.sharding)
-    state = jax.device_put(state, shard)
+    state = put_global(state, shard)
 
     train_step = jax.jit(make_train_step(cfg), donate_argnums=(0, 1),
                          in_shardings=(shard["params"], shard["opt"], batch_sharding),
@@ -161,25 +183,27 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
 
     def evaluate(params) -> float:
         # Fixed held-out batches (seed is independent of the training seed).
-        losses = [eval_step(params, jax.device_put(val.batch(i, cfg.batch_size, cfg.seq_len, seed=10_000), batch_sharding))
+        losses = [eval_step(params, put_batch(val.batch(i, cfg.batch_size, cfg.seq_len, seed=10_000), batch_sharding))
                   for i in range(cfg.eval_batches)]
         return float(np.mean([float(x) for x in losses]))
 
     def save(step: int) -> None:
-        checkpoint.save(ckpt_dir, step, state, {"config": cfg.to_dict()}, keep=cfg.keep_ckpts)
+        host_state = to_host(state)  # every process takes part in gathering sharded arrays
+        if main:
+            checkpoint.save(ckpt_dir, step, host_state, {"config": cfg.to_dict()}, keep=cfg.keep_ckpts)
 
     tokens_per_step = cfg.batch_size * cfg.seq_len
-    log(f"devices: {n_dev} x {devices[0].platform}; params: {sum(x.size for x in jax.tree.leaves(params)) / 1e6:.1f}M; "
+    log(f"devices: {n_dev} x {devices[0].platform} on {jax.process_count()} host(s); params: {sum(x.size for x in jax.tree.leaves(params)) / 1e6:.1f}M; "
         f"tokens/step: {tokens_per_step:,}; data: {data.n_tokens:,} tokens")
 
-    metrics_f = open(out / "metrics.jsonl", "a", encoding="utf-8")
+    metrics_f = open(out / "metrics.jsonl", "a", encoding="utf-8") if main else open(os.devnull, "w")
     last_metrics: dict = {}
     step = start
     try:
         with _StopFlag() as flag:
             t0, t_tokens = time.time(), 0
             while step < cfg.steps:
-                batch = jax.device_put(data.batch(step, cfg.batch_size, cfg.seq_len, cfg.seed), batch_sharding)
+                batch = put_batch(data.batch(step, cfg.batch_size, cfg.seq_len, cfg.seed), batch_sharding)
                 state["params"], state["opt"], m = train_step(state["params"], state["opt"], batch)
                 step += 1
                 t_tokens += tokens_per_step
@@ -209,7 +233,7 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
 
                 if step % cfg.ckpt_every == 0 or step == cfg.steps:
                     save(step)
-                if flag.stop or (stop_after is not None and step - start >= stop_after):
+                if any_process(flag.stop) or (stop_after is not None and step - start >= stop_after):
                     if step % cfg.ckpt_every:
                         save(step)
                     break

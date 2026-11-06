@@ -1,0 +1,29 @@
+{
+  "_comment": "First thing to run on a TPU VM or pod: a few minutes, checks multi-host, bf16, checkpoint and resume. Run the same command on every host. Then run it again with --set steps=400: it must print 'resumed from step 200' and finish at step 400.",
+  "data_dir": "/home/llm/tokens/train",
+  "val_dir": "/home/llm/tokens/val",
+  "out_dir": "/home/llm/runs/tpu-smoke",
+  "seq_len": 512,
+  "batch_size": 64,
+  "steps": 200,
+  "log_every": 20,
+  "eval_every": 100,
+  "eval_batches": 4,
+  "ckpt_every": 100,
+  "sharding": "fsdp",
+  "distributed": true,
+  "model": {
+    "vocab_size": 8192,
+    "d_model": 512,
+    "n_layers": 8,
+    "n_heads": 8,
+    "n_kv_heads": 4,
+    "max_seq_len": 512,
+    "dtype": "bfloat16"
+  },
+  "optim": {
+    "lr": 0.001,
+    "warmup_steps": 20,
+    "total_steps": 400
+  }
+}
