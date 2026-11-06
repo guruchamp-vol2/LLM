@@ -4,6 +4,7 @@ Pass 1 (streaming, per document):
     HTML extraction -> URL dedup -> URL safety -> quality filters -> text safety
     -> PII redaction -> exact dedup -> near-duplicate dedup (MinHash)
     -> educational-quality score (optional; stored as "quality", optionally filtered)
+    -> topic (optional; stored as "domain" and "domain_prob", used later to choose the data mix)
 Pass 2 (corpus-wide):
     count lines across all documents, strip lines repeated in many documents
     (headers, footers, menus), then re-check length.
@@ -23,6 +24,7 @@ from .extract import html_to_text
 from .filters import QualityConfig, SafetyConfig, quality_filter, text_safety_filter, url_filter
 from .io import ShardWriter, read_jsonl
 from .pii import redact_pii
+from .domain import DomainClassifier
 from .quality import QualityScorer
 
 
@@ -39,6 +41,8 @@ class PipelineConfig:
     # drop documents scoring below this; None = keep all and just store the score,
     # so the cut-off can be chosen later without re-running the pipeline
     min_quality: float | None = None
+    # path to a trained DomainClassifier (scripts/train_domain.py); None = don't tag topics
+    domain_model: str | None = None
 
 
 class Pipeline:
@@ -49,6 +53,7 @@ class Pipeline:
         self.exact = ExactDeduper()
         self.near = MinHashDeduper() if self.cfg.near_dedup else None
         self.scorer = QualityScorer.load(self.cfg.quality_model) if self.cfg.quality_model else None
+        self.domains = DomainClassifier.load(self.cfg.domain_model) if self.cfg.domain_model else None
         if self.cfg.min_quality is not None and self.scorer is None:
             raise ValueError("min_quality needs quality_model")
 
@@ -92,6 +97,10 @@ class Pipeline:
         out = {"text": text}
         if quality is not None:
             out["quality"] = quality
+        if self.domains is not None:
+            label, prob = self.domains.predict(text)
+            self.stats[f"domain:{label}"] += 1
+            out["domain"], out["domain_prob"] = label, round(prob, 3)
         if url:
             out["url"] = url
         if title:

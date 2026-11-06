@@ -20,12 +20,15 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 
 ## Status (2026-11-05)
 - Stage 1, tokenizer (`src/aio/tokenizer/bpe.py`): done, tests pass.
-- Stage 2, data pipeline (`src/aio/data/`): extraction, filters, PII, dedup and the pipeline are written. All 23 tests pass.
+- Stage 2, data pipeline (`src/aio/data/`): extraction, filters, PII, dedup and the pipeline are written. All 26 tests pass.
   - Known limitation: valid-looking version strings such as `1.2.3.4` are redacted as IPs.
   - Quality scorer (`quality.py`): done. A linear model over hashed words and word pairs (NumPy), trained on the free FineWeb-Edu annotations (467k pages graded 0-5, in `C:\llm-data\edu-annotations`). The model is at `C:\llm-data\models\quality.npz`, about 8 minutes to train. On held-out pages: Pearson 0.73, F1 0.60 at finding grade 3+ pages, with the tuned cut-off of 2.1 stored in the model. The pipeline stores a `quality` field per document, and `--min-quality` filters on it. To improve it later, rescore with our own transformer once stage 3 exists.
-- Next: domain classification (the last part of stage 2), then the JAX transformer (stage 3).
+  - Topic classifier (`domain.py`): done. A softmax over the same hashed features with 24 topics, trained on the free WebOrganizer topic annotations (100k pages labelled by Llama-3.1-405B, in `C:\llm-data	opic-annotations`). The model is at `C:\llm-data\models\domain.npz`, about 12 minutes to train. On the test split: 71.5% top-1 accuracy, 86% top-2, macro F1 0.70. Short texts get low confidence; normal pages (~580 words) are fine. The pipeline stores `domain` and `domain_prob`, and counts per topic go in stats. To improve it later, add the 1M-page Llama-3.1-8B annotations (2.9 GB) as a first training stage, as WebOrganizer did.
+  - Still open in stage 2: choosing the actual data mix (topic weights × quality cut-off). This is best decided with small-model experiments once stage 3/4 exist.
+- Next: the JAX transformer (stage 3).
 
 ## Commands
 - Tests: `python -m pytest -q tests`
 - Clean data: `python scripts/run_pipeline.py --input "raw/*.jsonl.gz" --output <out_dir>` (add `--quality-model C:/llm-data/models/quality.npz` to score pages)
+- Train topic classifier: `python scripts/train_domain.py --data C:/llm-data/topic-annotations --out C:/llm-data/models/domain.npz` (pipeline flag: `--domain-model`)
 - Train quality scorer: `python scripts/train_quality.py --data "C:/llm-data/edu-annotations/*.parquet" --out C:/llm-data/models/quality.npz`

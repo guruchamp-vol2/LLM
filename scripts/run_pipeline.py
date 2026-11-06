@@ -28,6 +28,7 @@ def main() -> None:
     ap.add_argument("--no-near-dedup", action="store_true")
     ap.add_argument("--quality-model", help="trained quality scorer (.npz) from scripts/train_quality.py")
     ap.add_argument("--min-quality", type=float, help="drop documents scoring below this")
+    ap.add_argument("--domain-model", help="trained topic classifier (.npz) from scripts/train_domain.py")
     args = ap.parse_args()
 
     inputs = sorted(glob.glob(args.input))
@@ -35,7 +36,7 @@ def main() -> None:
         sys.exit(f"no files match {args.input}")
 
     cfg = PipelineConfig(near_dedup=not args.no_near_dedup, quality_model=args.quality_model,
-                         min_quality=args.min_quality)
+                         min_quality=args.min_quality, domain_model=args.domain_model)
     if args.multilingual:
         cfg.quality.require_stop_words = False
     if args.blocked_domains:
