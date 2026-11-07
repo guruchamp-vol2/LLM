@@ -1,0 +1,15 @@
+{
+  "id": "guruchampvol2/llm-tpu-smoke",
+  "title": "llm-tpu-smoke",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "machine_shape": "TpuV5E8",
+  "dataset_sources": ["guruchampvol2/llm-tokens-sample"],
+  "competition_sources": [],
+  "kernel_sources": []
+}
