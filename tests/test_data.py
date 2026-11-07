@@ -94,7 +94,7 @@ def test_url_filter():
 def test_pii():
     text = (
         "Mail me at john.doe@example.com or call +1 415-555-0132. "
-        "Server 8.8.8.8, router 192.168.1.1. Card 4111 1111 1111 1111. "
+        "Server 93.184.216.34, router 192.168.1.1. Card 4111 1111 1111 1111. "
         "The year 2024 and pi 3.14159 stay. Version 1.2.300.4 stays."
     )
     out, n = redact_pii(text)
@@ -104,6 +104,18 @@ def test_pii():
     assert "[CARD]" in out
     assert "2024" in out and "3.14159" in out
     assert n == 4
+    assert redact_pii("Tel: 020 7946 0958")[0] == "Tel: [PHONE]"
+    assert redact_pii("Amex 3782 822463 10005, Visa 4111111111111111")[1] == 2
+
+
+def test_pii_leaves_maths_alone():
+    # All of these were redacted by the old rules (found in FineMath pages).
+    maths = ["xi 60 61 62 63 64 65 66 67 68 fi 1 2 3 4", "Divisors: 1 5 11 37 55 185 407 2035",
+             "Enter A Number : 113 197 199", "Example 1.2.3.4 shows", "Section 2.1.4.3 (Contagion)",
+             "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15", "2^50 = 1125899906842624", "the optimum is 100.4111111111111111",
+             "x = 0.3333333333333333"]
+    for t in maths:
+        assert redact_pii(t) == (t, 0), t
 
 
 # ------------------------------------------------------------------ dedup
