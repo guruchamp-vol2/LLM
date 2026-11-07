@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
@@ -81,6 +82,35 @@ class PoliteFetcher:
         if not self.allowed(url):
             raise PermissionError(f"robots.txt disallows {url}")
         return self._get(url)
+
+    def conditional(self, url: str, etag: str = "", last_modified: str = "") -> tuple[int, str, str, str]:
+        """GET that tells the server what we already have. Returns (status, body, etag,
+        last_modified). Status 304 means "not modified": nothing is downloaded, which is
+        how big crawlers re-check millions of pages cheaply."""
+        if not self.allowed(url):
+            raise PermissionError(f"robots.txt disallows {url}")
+        host = urllib.parse.urlsplit(url).netloc
+        wait = self.last.get(host, 0) + self.delay - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        headers = {"User-Agent": self.ua}
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                raw = r.read(5_000_000)
+                charset = r.headers.get_content_charset() or "utf-8"
+                return (r.status, raw.decode(charset, errors="replace"),
+                        r.headers.get("ETag", ""), r.headers.get("Last-Modified", ""))
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                return 304, "", etag, last_modified
+            raise
+        finally:
+            self.last[host] = time.time()
 
 
 # ---------------------------------------------------------------------- sources
@@ -165,12 +195,21 @@ def collect_wikipedia_featured(src: dict, fetch: Fetch, day: dt.date) -> list[di
 
 # ---------------------------------------------------------------------- the daily run
 def run_daily(sources: list[dict], index: SearchIndex, fetch: Fetch | None = None, day: dt.date | None = None,
-              keep_days: int = 60, log=print) -> dict:
+              keep_days: int = 60, log=print, frontier=None, budget: int = 1000) -> dict:
+    """Collect from all sources, then (with a frontier) re-check the `budget` most overdue
+    tracked pages. Old index days beyond keep_days are dropped."""
     fetch = fetch or PoliteFetcher()
     day = day or dt.date.today()
     stats = {"added": 0, "errors": 0}
     for src in sources:
+        name = src.get("name", src.get("url", src["type"]))
         try:
+            if src["type"] == "sitemap":
+                if frontier is None:
+                    raise ValueError("sitemap sources need a frontier (--frontier)")
+                n = add_sitemap(src["url"], frontier, fetch, source=name)
+                log(f"{name}: {n} new pages to track")
+                continue
             if src["type"] == "rss":
                 docs = collect_rss(src, fetch)
             elif src["type"] == "wikipedia_featured":
@@ -181,15 +220,50 @@ def run_daily(sources: list[dict], index: SearchIndex, fetch: Fetch | None = Non
                 d["text"], _ = redact_pii(d["text"])
             n = index.add(docs, day=day.isoformat())
             stats["added"] += n
-            log(f"{src.get('name', src.get('url', src['type']))}: {len(docs)} items, {n} new")
+            log(f"{name}: {len(docs)} items, {n} new")
         except Exception as e:  # one bad source must not stop the others
             stats["errors"] += 1
-            log(f"{src.get('name', src.get('url', src['type']))}: failed ({e})")
+            log(f"{name}: failed ({e})")
+
+    if frontier is not None and hasattr(fetch, "conditional"):
+        from .frontier import crawl
+
+        c = crawl(frontier, index, fetch, budget=budget, day=day.isoformat(), log=log)
+        stats["added"] += c["changed"]
+        stats["crawl"] = c
+        log(f"re-checked {c['checked']} tracked pages: {c['changed']} new or changed, "
+            f"{c['not_modified'] + c['unchanged']} unchanged, {c['errors']} errors")
+
     cutoff = day - dt.timedelta(days=keep_days)
+    dropped_urls = set()
     for f in Path(index.dir).glob("docs-*.jsonl"):
         try:
-            if dt.date.fromisoformat(f.stem[5:]) < cutoff:
-                f.unlink()
+            old = dt.date.fromisoformat(f.stem[5:]) < cutoff
         except ValueError:
-            pass
+            continue
+        if old:
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    dropped_urls.add(json.loads(line).get("url", ""))
+            f.unlink()
+    if frontier is not None and dropped_urls:
+        # A tracked page whose only copy was just dropped must be downloaded again in
+        # full, or it would vanish from search while staying "unchanged".
+        for url in dropped_urls & set(frontier.pages):
+            p = frontier.pages[url]
+            p.etag = p.last_modified = p.content_hash = ""
+            p.next_due = 0.0
+        frontier.save()
     return stats
+
+
+def add_sitemap(url: str, frontier, fetch: Fetch, source: str = "", max_sitemaps: int = 20) -> int:
+    """Add the pages of a sitemap (following a sitemap index) to the frontier."""
+    todo, done, added = [url], 0, 0
+    while todo and done < max_sitemaps:
+        n, nested = frontier.add_from_sitemap(fetch(todo.pop(0)), source=source)
+        added += n
+        todo += nested
+        done += 1
+    frontier.save()
+    return added

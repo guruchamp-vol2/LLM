@@ -62,6 +62,7 @@ class SearchIndex:
         self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)  # term -> [(doc, count)]
         self.lengths: list[int] = []
         self.seen: set[str] = set()
+        self.latest: dict[str, int] = {}  # url -> position of its newest version
         for f in sorted(self.dir.glob("docs-*.jsonl")):
             for line in f.read_text(encoding="utf-8").splitlines():
                 if line.strip():
@@ -70,15 +71,21 @@ class SearchIndex:
     # ------------------------------------------------------------------ building
     @staticmethod
     def doc_id(doc: dict) -> str:
-        key = doc.get("url") or doc["text"][:2000]
+        """Same URL and same text = same document. A changed page (same URL, new text)
+        gets a new id, is stored as a new version, and replaces the old one in search."""
+        url, text = doc.get("url", ""), doc["text"]
+        key = url + "\n" + hashlib.sha1(text.encode("utf-8")).hexdigest() if url else text[:2000]
         return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
     def _index(self, doc: dict) -> None:
-        if doc["id"] in self.seen:
+        key = self.doc_id(doc)
+        if doc["id"] in self.seen or key in self.seen:
             return
-        self.seen.add(doc["id"])
+        self.seen.update((doc["id"], key))  # stored ids from older versions of this code differ
         i = len(self.docs)
         self.docs.append(doc)
+        if doc.get("url"):
+            self.latest[doc["url"]] = i
         counts = Counter(terms(doc.get("title", "") + " " + doc["text"]))
         self.lengths.append(sum(counts.values()))
         for t, c in counts.items():
@@ -86,8 +93,9 @@ class SearchIndex:
 
     def add(self, docs: Iterable[dict], day: str | None = None) -> int:
         """Add documents (each needs "text"; "url", "title", "source" are optional).
-        Documents already in the index (same URL, or same text when there is no URL)
-        are skipped. Returns how many were new."""
+        Documents already in the index (same URL and text, or same text when there is no
+        URL) are skipped; a known URL with new text is added as its newest version.
+        Returns how many were added."""
         day = day or dt.date.today().isoformat()
         new = 0
         with open(self.dir / f"docs-{day}.jsonl", "a", encoding="utf-8") as f:
@@ -104,8 +112,13 @@ class SearchIndex:
         return new
 
     # ------------------------------------------------------------------ searching
+    def _current(self, i: int) -> bool:
+        url = self.docs[i].get("url")
+        return not url or self.latest.get(url) == i
+
     def __len__(self) -> int:
-        return len(self.docs)
+        """Number of current documents (older versions of changed pages don't count)."""
+        return sum(1 for i in range(len(self.docs)) if self._current(i))
 
     def search(self, query: str, k: int = 5) -> list[Hit]:
         n = len(self.docs)
@@ -121,8 +134,8 @@ class SearchIndex:
             for i, c in plist:
                 norm = self.k1 * (1 - self.b + self.b * self.lengths[i] / avg)
                 scores[i] += idf * c * (self.k1 + 1) / (c + norm)
-        best = sorted(scores.items(), key=lambda kv: -kv[1])[:k]
-        return [Hit(s, self.docs[i]) for i, s in best]
+        ranked = [(i, s) for i, s in sorted(scores.items(), key=lambda kv: -kv[1]) if self._current(i)]
+        return [Hit(s, self.docs[i]) for i, s in ranked[:k]]
 
 
 def search_tool(index: SearchIndex, k: int = 3, width: int = 300):

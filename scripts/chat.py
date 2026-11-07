@@ -27,6 +27,7 @@ from aio.agent import DEFAULT_TOOLS, run as agent_run  # noqa: E402
 from aio.memory import FeedbackLog, Memory  # noqa: E402
 from aio.model import init_params  # noqa: E402
 from aio.retrieval import SearchIndex, search_tool  # noqa: E402
+from aio.retrieval.live import wikipedia_search_tool  # noqa: E402
 from aio.tokenizer import BPETokenizer  # noqa: E402
 from aio.train import TrainConfig, checkpoint  # noqa: E402
 from aio.train.optim import init_opt_state  # noqa: E402
@@ -39,6 +40,7 @@ def main() -> None:
     ap.add_argument("--system", default="", help="optional system message")
     ap.add_argument("--tools", action="store_true", help="let the model call the calculator (and search, with --index)")
     ap.add_argument("--index", help="search index folder (from scripts/collect.py) for the search tool")
+    ap.add_argument("--wikipedia", action="store_true", help="with --tools: also allow live Wikipedia search")
     ap.add_argument("--memory", help="folder for remembered corrections")
     ap.add_argument("--feedback", help="JSONL file for /good /bad /fix")
     ap.add_argument("--max-new", type=int, default=150)
@@ -61,6 +63,8 @@ def main() -> None:
         tools = dict(DEFAULT_TOOLS)
         if args.index:
             tools["search"] = search_tool(SearchIndex(args.index))
+        if args.wikipedia:
+            tools["wikipedia"] = wikipedia_search_tool()
     memory = Memory(args.memory) if args.memory else None
     feedback = FeedbackLog(args.feedback) if args.feedback else None
     key = jax.random.PRNGKey(0)
