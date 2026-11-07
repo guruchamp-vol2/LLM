@@ -9,12 +9,21 @@ Message text is encoded with encode_ordinary, so a user typing "<|assistant|>" c
 inject a role marker. The loss mask is 1 only on assistant text and its <|end|>, so the
 model learns to answer, not to imitate users.
 
+Tool use: an assistant message may hold a tool call instead of text,
+{"role": "assistant", "tool_call": {"name": ..., "arguments": {...}}}, rendered as
+    <|assistant|> <|tool_call|> {"arguments":{...},"name":...} <|end|>
+and the tool's answer is a message {"role": "tool", "content": "..."}, rendered as
+    <|tool_result|> ...result... <|end|>
+The model is trained on the tool call (it must learn when and how to call), never on
+the tool's result (that comes from the tool).
+
 Datasets are saved as .npz files (flat token arrays plus offsets) and loaded whole: chat
 datasets are small next to pretraining data.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -22,9 +31,16 @@ import numpy as np
 
 from ..tokenizer import BPETokenizer
 
-ROLE_TOKENS = {"system": "<|system|>", "user": "<|user|>", "assistant": "<|assistant|>"}
+ROLE_TOKENS = {"system": "<|system|>", "user": "<|user|>", "assistant": "<|assistant|>", "tool": "<|tool_result|>"}
 END = "<|end|>"
 PAD = "<|pad|>"
+TOOL_CALL = "<|tool_call|>"
+
+
+def tool_call_text(call: dict) -> str:
+    """Canonical JSON for a tool call: compact, keys in a fixed order."""
+    return json.dumps({"name": call["name"], "arguments": call.get("arguments", {})},
+                      separators=(",", ":"), sort_keys=True)
 
 
 def render(tok: BPETokenizer, messages: list[dict], add_generation_prompt: bool = False) -> tuple[list[int], list[int]]:
@@ -36,7 +52,10 @@ def render(tok: BPETokenizer, messages: list[dict], add_generation_prompt: bool 
         role = m["role"]
         if role not in ROLE_TOKENS:
             raise ValueError(f"unknown role {role!r}")
-        body = tok.encode_ordinary(m["content"]) + [end_id]
+        if role == "assistant" and m.get("tool_call") is not None:
+            body = [tok.special_tokens[TOOL_CALL]] + tok.encode_ordinary(tool_call_text(m["tool_call"])) + [end_id]
+        else:
+            body = tok.encode_ordinary(m["content"]) + [end_id]
         ids.append(tok.special_tokens[ROLE_TOKENS[role]])
         mask.append(0)
         ids += body

@@ -43,7 +43,18 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
   - Sweep v2 (`C:/llm-data/sweeps/laptop-v2`, done 2026-11-06): batch 8, at least 400 steps, budgets 1e13/3e13/1e14, widths 64-256, no repeated data. Larger models improved by 0.2-0.5 loss over v1, but **the smallest width still won at every budget**, so the optimum lies below the tested range. The fit (E=3.39, alpha=0.59, beta=0.26) is still not trustworthy for sizing (it predicts thousands of tokens/param). The smallest model with the most steps did slightly worse at batch 8 than at batch 32, because small batches add noise.
   - Conclusion: the laptop can't reach the regime where sizes trade off. The real sweep on TPU should use widths that put each budget's minimum inside the range (check with `--dry-run`, and look for a U-shape per budget before fitting).
   - The laptop only reaches tiny models (<6M non-embedding params), where the 8k embedding dominates. A sweep that sets the real model size has to run on the TPUs.
-- Next: check sweep v2; get the code ready for TPU (multi-host `jax.distributed`, bf16 run, a TPU setup guide that avoids paid storage/egress); then a sweep on TPU to choose the final size.
+- TPU readiness: multi-host support in the trainer (`distributed: true`; process 0 saves to local disk and broadcasts on resume, so no paid shared storage). It's **untested across hosts**, because Windows has no multi-process CPU collectives. `configs/tpu-smoke.json` is the first thing to run on a pod. The $0 guide is `docs/tpu.md`.
+- Stage 6, post-training (`src/aio/post/`): done. 
+  - Chat template with role special tokens. Content is encoded with `encode_ordinary`, so no role injection, and loss is on assistant text + `<|end|>` only.
+  - Objectives in the trainer: `objective: "lm"` (pretrain/SFT) or `"dpo"` (frozen reference = `init_from` model, `dpo_beta`). `init_from` starts from another run's newest checkpoint.
+  - Data: `scripts/prepare_chat.py` (smol-smoltalk, Apache-2.0, for SFT; ultrafeedback_binarized, MIT, for DPO) writes `.npz`. Raw data is in `C:/llm-data/chat/`. With `--max-len 513`: 139k SFT conversations and 27k DPO pairs.
+  - Laptop SFT (`configs/laptop-sft.json`, from laptop-tiny, 1500 steps, seq 512): val loss on assistant text 2.50 (ppl 12.2). It follows the chat format and stops at `<|end|>`, and answers "What is the capital of France?" with "The capital of France is Paris." Longer answers are fluent but confused (6.5M params).
+  - Laptop DPO: `configs/laptop-dpo.json` (from laptop-sft). `scripts/chat.py` is a terminal chat (`--once` for one question).
+  - Not built yet: a separate reward model (DPO doesn't need one).
+- Stage 7, evaluation (`src/aio/eval/`, `scripts/eval_mc.py`): multiple-choice by log-likelihood (acc and per-byte acc_norm) for HellaSwag, ARC-Easy/Challenge and MMLU (files cached in `C:/llm-data/evals`).
+  - Base laptop-tiny, 1000 items each, acc_norm: HellaSwag 0.297, ARC-E 0.295, ARC-C 0.224, MMLU 0.244 (chance 0.25). HellaSwag and ARC-E are a bit above chance; the others are at chance, as expected at this size.
+  - Not built yet: LLM-as-judge, our own task suites, perplexity-by-domain report.
+- Next: stage 8 pieces that can be built small (tool-call format and execution loop, retrieval), the reward model, and more eval. Bigger models wait for TPU.
 
 ## Commands
 - Tests: `python -m pytest -q tests`
@@ -53,5 +64,9 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 - Tokenize: `python scripts/tokenize_data.py --input "<clean>/final/*.jsonl.gz" --tokenizer <tok.json> --out <tokens_dir>` (writes train/ and val/)
 - Train model: `python scripts/train.py --config configs/laptop-tiny.json [--set steps=100 --set model.d_model=128]` (re-run the same command to resume)
 - Scaling sweep v2: `python scripts/sweep.py --config configs/laptop-tiny.json --out C:/llm-data/sweeps/laptop-v2 --budgets 1e13 3e13 1e14 --widths 64 96 128 192 256 --batch-size 8 --min-steps 400 --max-tokens 49e6` (add `--dry-run` to see the plan only)
+- Chat data: `python scripts/prepare_chat.py --format smoltalk|ultrafeedback --input "<parquet glob>" --tokenizer <tok.json> --out <file.npz> --max-len 513`
+- SFT / DPO: `python scripts/train.py --config configs/laptop-sft.json` then `configs/laptop-dpo.json`
+- Chat: `python scripts/chat.py --run C:/llm-data/runs/laptop-sft --tokenizer C:/llm-data/tokenizer-8k.json`
+- Benchmarks: `python scripts/eval_mc.py --run <out_dir> --tokenizer <tok.json> --tasks hellaswag arc_easy --limit 1000`
 - Generate: `python scripts/generate.py --run <out_dir> --tokenizer <tok.json> --prompt "Once upon a time"`
 - Train quality scorer: `python scripts/train_quality.py --data "C:/llm-data/edu-annotations/*.parquet" --out C:/llm-data/models/quality.npz`
