@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -106,6 +107,14 @@ def parse_feed(xml: str) -> list[dict]:
     return items
 
 
+_ARXIV_PREFIX = re.compile(r"^arXiv:\S+\s+Announce Type:\s*\S+\s*(Abstract:)?\s*")
+
+
+def _clean_summary(s: str) -> str:
+    """Drop boilerplate some feeds put before the real summary (e.g. arXiv's header)."""
+    return _ARXIV_PREFIX.sub("", s.strip())
+
+
 def _strip_html(s: str) -> str:
     if "<" not in s:
         return s
@@ -115,7 +124,7 @@ def _strip_html(s: str) -> str:
 def collect_rss(src: dict, fetch: Fetch) -> list[dict]:
     out = []
     for it in parse_feed(fetch(src["url"])):
-        text = _strip_html(it["summary"])
+        text = _clean_summary(_strip_html(it["summary"]))
         if src.get("full_text") and it["url"]:
             try:
                 _, page = html_to_text(fetch(it["url"]))

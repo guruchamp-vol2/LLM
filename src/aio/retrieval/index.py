@@ -125,8 +125,9 @@ class SearchIndex:
         return [Hit(s, self.docs[i]) for i, s in best]
 
 
-def search_tool(index: SearchIndex, k: int = 3):
-    """A tool function for the agent loop: search(query) -> short numbered results."""
+def search_tool(index: SearchIndex, k: int = 3, width: int = 300):
+    """A tool function for the agent loop: search(query) -> short numbered results.
+    k results with snippets of about `width` characters (keep small for short-context models)."""
 
     def search(query: str) -> str:
         if not isinstance(query, str) or not query.strip():
@@ -137,7 +138,7 @@ def search_tool(index: SearchIndex, k: int = 3):
         lines = []
         for n, h in enumerate(hits, 1):
             src = h.doc.get("url") or h.doc.get("source") or "local"
-            lines.append(f"[{n}] {h.doc.get('title') or '(untitled)'} ({src}, {h.doc.get('date', '')}): {h.snippet(query)}")
+            lines.append(f"[{n}] {h.doc.get('title') or '(untitled)'} ({src}, {h.doc.get('date', '')}): {h.snippet(query, width)}")
         return "\n".join(lines)
 
     return search

@@ -32,10 +32,21 @@ def main() -> None:
     ap.add_argument("--max-len", type=int, default=513)
     ap.add_argument("--max-digits", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--index", help="search index: also add search-tool conversations about its pages")
+    ap.add_argument("--n-search", type=int, default=0)
+    ap.add_argument("--split", choices=["train", "test"], help="which pages of the index to use (by stable hash)")
     args = ap.parse_args()
 
     tok = BPETokenizer.load(args.tokenizer)
     convs = calc_conversations(args.n_tool, seed=args.seed, max_digits=args.max_digits)
+    if args.index and args.n_search:
+        from aio.agent.synth import search_conversations
+        from aio.retrieval import SearchIndex
+
+        found = [c for c in search_conversations(SearchIndex(args.index), args.n_search, seed=args.seed, split=args.split)
+                 if len(render(tok, c)[0]) <= args.max_len]
+        print(f"{len(found):,} search conversations")
+        convs += found
     chat = []
     for f in args.chat.split(","):
         for msgs in pq.read_table(f, columns=["messages"]).column("messages").to_pylist():

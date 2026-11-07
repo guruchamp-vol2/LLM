@@ -68,6 +68,27 @@ def test_agent_loop_handles_bad_calls():
     assert new[-1] == {"role": "assistant", "content": "done"}
 
 
+def test_search_conversations(tmp_path):
+    from aio.agent.synth import in_split, search_conversations
+    from aio.retrieval import SearchIndex
+
+    idx = SearchIndex(tmp_path)
+    idx.add([{"url": f"https://e.org/{i}", "title": f"Topic number {w}",
+              "text": f"Topic {w} is a subject about {w}. More detail follows here."}
+             for i, w in enumerate(["apples", "rivers", "comets", "violins", "glaciers", "tigers", "kites", "lasers"])],
+            day="2026-11-06")
+    convs = search_conversations(idx, 20, seed=0)
+    assert convs
+    for c in convs:
+        q = c[1]["tool_call"]["arguments"]["query"]
+        assert c[1]["tool_call"]["name"] == "search" and q.startswith("Topic number")
+        assert q in c[2]["content"]                     # the result lists the page searched for
+        assert c[3]["content"].endswith(")") and "Source: https://e.org/" in c[3]["content"]
+    train_ids = {d["id"] for d in idx.docs if in_split(d["id"], "train")}
+    test_ids = {d["id"] for d in idx.docs if in_split(d["id"], "test")}
+    assert not train_ids & test_ids and len(train_ids | test_ids) == len(idx)
+
+
 def test_tiny_model_learns_to_use_calculator(tmp_path):
     """After training on synthetic calculator chats, a tiny model answers unseen sums
     exactly: something it could never do by itself."""
