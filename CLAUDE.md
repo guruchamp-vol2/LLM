@@ -10,7 +10,8 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 - **Kaggle:** free weekly TPU/GPU notebook quota with no billing. This is the $0 fallback for training beyond the laptop.
 - **Google Cloud free trial:** $300 credit, expires 2027-02-04. Not upgraded to paid. Don't buy the "Cloud TPU v5e Fixed Price Subscription."
 - Still unknown: how long TRC access lasts, which TPU types, and whether the clock has started. Don't start the clock until the training code is ready.
-- This folder is inside OneDrive. Keep datasets and checkpoints out of it (see .gitignore) and use a non-synced folder such as `C:\llm-data`.
+- **Work in `C:\Users\dhruv\dev\LLM`** (moved 2026-11-06). The old copy in OneDrive (`Documents\llm\LLM`) is retired: OneDrive synced old git internals back over a history rewrite. Never keep a git repo inside OneDrive. Datasets, checkpoints and models live in `C:\llm-data` (not synced, not in git).
+- GitHub: `github.com/guruchamp-vol2/LLM` (public). Commits use the noreply email `192667881+guruchamp-vol2@users.noreply.github.com`, set in this repo's git config. Never commit with the personal email.
 
 ## Decisions
 - Byte-level BPE tokenizer with special tokens for chat, tools and modalities.
