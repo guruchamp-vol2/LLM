@@ -1,0 +1,6 @@
+[
+  {"type": "wikipedia_featured", "lang": "en", "name": "Wikipedia daily feed"},
+  {"type": "rss", "url": "https://rss.arxiv.org/rss/cs.CL", "name": "arXiv: computation and language", "full_text": false},
+  {"type": "rss", "url": "https://rss.arxiv.org/rss/cs.LG", "name": "arXiv: machine learning", "full_text": false},
+  {"type": "rss", "url": "https://www.nasa.gov/feed/", "name": "NASA news", "full_text": false}
+]

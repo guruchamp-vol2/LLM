@@ -1,0 +1,28 @@
+{
+  "_comment": "Teach the laptop SFT model to use the calculator: 20k synthetic tool chats + 20k ordinary chats.",
+  "data_dir": "C:/llm-data/chat/tool-mix.npz",
+  "val_dir": "C:/llm-data/chat/tool-mix-val.npz",
+  "out_dir": "C:/llm-data/runs/laptop-tools",
+  "init_from": "C:/llm-data/runs/laptop-sft/checkpoints",
+  "seq_len": 512,
+  "batch_size": 16,
+  "steps": 1000,
+  "log_every": 25,
+  "eval_every": 250,
+  "eval_batches": 10,
+  "ckpt_every": 250,
+  "model": {
+    "vocab_size": 8192,
+    "d_model": 256,
+    "n_layers": 6,
+    "n_heads": 4,
+    "n_kv_heads": 2,
+    "max_seq_len": 512
+  },
+  "optim": {
+    "lr": 0.0003,
+    "warmup_steps": 30,
+    "total_steps": 1000,
+    "weight_decay": 0.1
+  }
+}
