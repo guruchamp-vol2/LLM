@@ -75,6 +75,15 @@ def _short_title(title: str, limit: int = 80) -> str:
     return title[:limit].rsplit(" ", 1)[0]  # cut at a word boundary
 
 
+def keywords(title: str, n: int = 5) -> str:
+    """The first n meaningful words of a title: a short query that is easy to copy and
+    still finds the page."""
+    from ..retrieval.index import _STOP, _WORD
+
+    words = [w for w in _WORD.findall(title) if w.lower() not in _STOP]
+    return " ".join(words[:n])
+
+
 def in_split(doc_id: str, split: str, test_frac: float = 0.1) -> bool:
     """Stable train/test split of pages by id, so test questions are about pages the model
     never saw in training (it has to really search and read)."""
@@ -99,17 +108,22 @@ def search_conversations(index, n: int, seed: int = 0, k: int = 2, width: int = 
     docs = [d for d in index.docs if d.get("title") and len(d["text"]) > 40
             and (split is None or in_split(d["id"], split))]
     out = []
-    for _ in range(min(n, len(docs) * 3)):
+    if not docs:
+        return out
+    for _ in range(n * 3):  # pages repeat with different phrasings; some tries are skipped
         d = rng.choice(docs)
         title = _short_title(d["title"])
-        result = tool(title)
+        query = keywords(title)
+        if not query:
+            continue
+        result = tool(query)
         if d["title"][:40] not in result:
-            continue  # the page isn't in the top results for its own title: skip
+            continue  # the page isn't in the top results for its keywords: skip
         answer = _first_sentence(_clean_summary(d["text"]))
         src = d.get("url") or d.get("source", "")
         out.append([
             {"role": "user", "content": rng.choice(_SEARCH_Q).format(t=title)},
-            {"role": "assistant", "tool_call": {"name": "search", "arguments": {"query": title}}},
+            {"role": "assistant", "tool_call": {"name": "search", "arguments": {"query": query}}},
             {"role": "tool", "content": result},
             {"role": "assistant", "content": answer + (f" (Source: {src})" if src else "")},
         ])

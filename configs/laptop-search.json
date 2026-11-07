@@ -1,16 +1,16 @@
 {
-  "_comment": "Teach the laptop calculator model to use search too: search chats on 90% of indexed pages + calculator + ordinary chat. Validation asks about the held-out 10%.",
+  "_comment": "Teach the laptop calculator model to use search too: search chats on 90% of indexed pages + calculator + ordinary chat. Validation asks about the held-out 10%. v2: keyword queries (first 5 meaningful title words), 6k search chats, 1500 steps.",
   "data_dir": "C:/llm-data/chat/search-mix.npz",
   "val_dir": "C:/llm-data/chat/search-mix-val.npz",
-  "out_dir": "C:/llm-data/runs/laptop-search",
+  "out_dir": "C:/llm-data/runs/laptop-search2",
   "init_from": "C:/llm-data/runs/laptop-tools/checkpoints",
   "seq_len": 512,
   "batch_size": 16,
-  "steps": 600,
+  "steps": 1500,
   "log_every": 25,
-  "eval_every": 200,
+  "eval_every": 250,
   "eval_batches": 10,
-  "ckpt_every": 200,
+  "ckpt_every": 250,
   "model": {
     "vocab_size": 8192,
     "d_model": 256,
@@ -21,8 +21,8 @@
   },
   "optim": {
     "lr": 0.0003,
-    "warmup_steps": 20,
-    "total_steps": 600,
+    "warmup_steps": 30,
+    "total_steps": 1500,
     "weight_decay": 0.1
   }
 }
