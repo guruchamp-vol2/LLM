@@ -13,7 +13,7 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
   - CLI lives in its own venv (`C:\Users\dhruv\.venvs\kaggle`), token in `C:\Users\dhruv\.kaggle\.env` (never print it). Call: `set -a; . ~/.kaggle/.env; set +a; ~/.venvs/kaggle/Scripts/kaggle.exe ...`.
   - **TPUs need Kaggle identity verification** (separate from phone verification; done 2026-11-07). Before that, TPU runs silently got a CPU machine (`jax.devices()` = CpuDevice, `kaggle quota` stays 0.00h).
   - Push runs from the CLI: `kaggle kernels push -p kaggle/smoke --accelerator TpuV5E8`. Don't edit the kernel in the web editor (it turns the script into an empty notebook). TPU v5e-8 runs can sit QUEUED for hours at busy times. `kaggle/smoke/run.py` stops early if no TPU is visible and has a 50-minute deadline.
-  - Kaggle runs clone the code from GitHub, so the user must `git push` first (pushes from Claude's shell fail).
+  - Kaggle runs clone the code from GitHub, so push first. Normal (non-force) pushes work from Claude's shell since 2026-11-07 (`GIT_TERMINAL_PROMPT=0 git push`); force pushes still need the user.
 - **Google Cloud free trial:** $300 credit, expires 2027-02-04. Not upgraded to paid. Don't buy the "Cloud TPU v5e Fixed Price Subscription."
 - Still unknown: how long TRC access lasts, which TPU types, and whether the clock has started. Don't start the clock until the training code is ready.
 - **Work in `C:\Users\dhruv\dev\LLM`** (moved 2026-11-06). The old copy in OneDrive (`Documents\llm\LLM`) is retired: OneDrive synced old git internals back over a history rewrite. Never keep a git repo inside OneDrive. Datasets, checkpoints and models live in `C:\llm-data` (not synced, not in git).
