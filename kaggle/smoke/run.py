@@ -46,21 +46,35 @@ def save() -> None:
 
 
 # ---------------------------------------------------------------- environment
-try:
-    import jax  # noqa: F401
-except ImportError:
-    sh(f"{sys.executable} -m pip install -q -U 'jax[tpu]'")
 sh(f"{sys.executable} -m pip install -q regex pyarrow")
-try:
-    out = subprocess.run([sys.executable, "-c", "import jax; print(jax.__version__); print(jax.devices())"],
-                         capture_output=True, text=True, timeout=300)
-except subprocess.TimeoutExpired:
-    results["jax"] = "TIMEOUT: jax.devices() did not return in 5 minutes (TPU not reachable?)"
-    save()
-    sys.exit(results["jax"])
-print(out.stdout, out.stderr[-2000:], flush=True)
-results["jax"] = out.stdout.strip()
+# What the machine has: TPU chips show up as /dev/accel* (or /dev/vfio) on TPU VMs.
+results["machine"] = {
+    "accel_devices": sorted(glob.glob("/dev/accel*") + glob.glob("/dev/vfio/*")),
+    "env": {k: v for k, v in os.environ.items() if "TPU" in k or "ACCELERATOR" in k},
+}
+print(results["machine"], flush=True)
+
+
+def devices() -> str:
+    try:
+        out = subprocess.run([sys.executable, "-c", "import jax; print(jax.__version__, jax.devices())"],
+                             capture_output=True, text=True, timeout=300)
+        return (out.stdout.strip() or out.stderr[-1500:]).strip()
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT: jax.devices() did not return in 5 minutes"
+
+
+results["jax"] = devices()
+print(results["jax"], flush=True)
+if "Tpu" not in results["jax"] and "TPU" not in results["jax"]:
+    # The image's JAX can lack the TPU runtime (libtpu): install the TPU build and retry.
+    sh(f"{sys.executable} -m pip install -q -U 'jax[tpu]'", check=False)
+    results["jax_after_install"] = results["jax"] = devices()
+    print(results["jax"], flush=True)
 save()
+if "Tpu" not in results["jax"] and "TPU" not in results["jax"]:
+    # Training on CPU would take hours and prove nothing: stop now.
+    sys.exit(f"no TPU visible to JAX: {results['jax']}")
 
 if not os.path.exists(REPO):
     sh(f"git clone -q --depth 1 https://github.com/guruchamp-vol2/LLM.git {REPO}")
