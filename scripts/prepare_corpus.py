@@ -48,9 +48,8 @@ SOURCES = {
         "files": lambda i: f"{HF}/codeparrot/github-code-clean/resolve/main/data/train-{i:05d}-of-00880.parquet",
         "n": 880, "kind": "code", "text": "code", "lang": "language", "license": "license", "path": "path",
     },
-    "opc-annealing": {  # ODC-By
-        "list": [f"{HF}/OpenCoder-LLM/opc-annealing-corpus/resolve/main/{c}" for c in
-                 ("algorithmic_corpus", "synthetic_code_snippet", "synthetic_qa")],
+    "opc-annealing": {  # ODC-By. Stored as JSON lines; we read the Hub's parquet copy.
+        "parquet_api": "OpenCoder-LLM/opc-annealing-corpus",
         "kind": "code", "text": "text", "lang": "lang",
     },
     "fineweb-edu": {  # ODC-By; pages graded 3+ for educational value by the FineWeb team
@@ -73,18 +72,27 @@ def parquet_urls(src: dict, shards: str | None) -> list[str]:
     if "files" in src:
         lo, hi = (int(x) for x in (shards or f"0-{src['n'] - 1}").split("-"))
         return [src["files"](i) for i in range(lo, hi + 1)]
-    urls = []
-    for base in src["list"]:  # list the parquet files in each folder via the Hub API
-        repo, folder = base.split("/resolve/main/")
-        api = repo.replace(HF, "https://huggingface.co/api/datasets") + f"/tree/main/{folder}"
-        with urllib.request.urlopen(api, timeout=60) as r:
-            urls += [f"{repo}/resolve/main/{f['path']}" for f in json.load(r) if f["path"].endswith(".parquet")]
+    # The Hub keeps a parquet copy of every dataset: {config: {split: [urls]}}.
+    api = f"https://huggingface.co/api/datasets/{src['parquet_api']}/parquet"
+    with urllib.request.urlopen(api, timeout=60) as r:
+        listing = json.load(r)
+    urls = [u for splits in listing.values() for us in splits.values() for u in us]
+    if not urls:
+        sys.exit(f"no parquet files listed at {api}")
     return sorted(urls)
 
 
-def download(url: str, tmp: Path) -> Path:
+def input_tag(url: str) -> str:
+    """A unique, file-name-safe name per input file (used for shard names and .done markers)."""
+    for marker in ("/resolve/main/", "/parquet/"):
+        if marker in url:
+            return url.split(marker, 1)[1].replace("/", "_").removesuffix(".parquet")
+    return url.rsplit("/", 1)[1].removesuffix(".parquet")
+
+
+def download(url: str, tmp: Path, tag: str) -> Path:
     tmp.mkdir(parents=True, exist_ok=True)
-    path = tmp / url.rsplit("/", 1)[1]
+    path = tmp / f"{tag}.parquet"
     part = path.with_suffix(".part")
     req = urllib.request.Request(url, headers={"User-Agent": "aio-llm-data/0.1"})
     for attempt in range(5):
@@ -127,14 +135,13 @@ def main() -> None:
     inputs = sorted(glob.glob(args.local)) if args.local else parquet_urls(src, args.shards)
     for url in inputs:
         url = url.replace("\\", "/")
-        name = url.rsplit("/", 1)[1].removesuffix(".parquet")
-        tag = (url.split("/resolve/main/")[1] if "/resolve/main/" in url else name).replace("/", "_")
-        tag = tag.removesuffix(".parquet")
+        tag = input_tag(url)
+        name = tag
         done = out / f"{tag}.done"
         if done.exists():
             continue
         t0 = time.time()
-        local = Path(url) if args.local else download(url, Path(args.tmp))
+        local = Path(url) if args.local else download(url, Path(args.tmp), tag)
         stats: Counter = Counter()
         cols = [c for c in (src["text"], src.get("lang"), lic_col, src.get("path")) if c] + src.get("extra", [])
         with ShardWriter(out, prefix=tag, docs_per_shard=100_000) as w:

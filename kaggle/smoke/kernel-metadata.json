@@ -9,7 +9,10 @@
   "enable_tpu": true,
   "enable_internet": true,
   "machine_shape": "TpuV5E8",
-  "dataset_sources": ["guruchampvol2/llm-tokens-sample"],
+  "dataset_sources": [
+    "guruchampvol2/llm-tokens-sample"
+  ],
   "competition_sources": [],
-  "kernel_sources": []
+  "kernel_sources": [],
+  "docker_image_pinning_type": "latest"
 }
