@@ -115,6 +115,14 @@ def test_mixture_dataset(tmp_path):
         MixtureDataset(f"{tmp_path / 'a'}=1,{tmp_path / 'c'}=1")
 
 
+def test_time_limit_saves_and_resumes(tmp_path):
+    cfg = _cfg(tmp_path, time_limit_s=1e-9, steps=40)        # out of time after the first step
+    r = train(cfg, log=lambda *a: None)
+    assert r["step"] == 1 and checkpoint.latest_step(Path(cfg.out_dir) / "checkpoints") == 1
+    r = train(_cfg(tmp_path, steps=40), log=lambda *a: None)  # next session finishes the run
+    assert r["step"] == 40
+
+
 def test_checkpoint_roundtrip_and_keep(tmp_path):
     state = {"a": jnp.arange(4.0), "b": {"c": jnp.ones((2, 3), jnp.int32)}}
     for s in (10, 20, 30, 40):

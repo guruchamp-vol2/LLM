@@ -1,0 +1,34 @@
+{
+  "_comment": "Main pretraining run on Kaggle TPU v5e-8 (kaggle/pretrain/run.py fills in data_dir, val_dir, out_dir and time_limit_s). PROVISIONAL size: ~300M params (266M non-embedding), 21B tokens; set the final width/depth and steps from the smoke test's tokens/s. 0.5M tokens per step (256 x 2048).",
+  "data_dir": "set-by-kaggle-run",
+  "out_dir": "set-by-kaggle-run",
+  "seq_len": 2048,
+  "batch_size": 256,
+  "grad_accum": 4,
+  "sharding": "fsdp",
+  "steps": 40000,
+  "log_every": 50,
+  "eval_every": 1000,
+  "eval_batches": 20,
+  "ckpt_every": 1000,
+  "keep_ckpts": 1,
+  "model": {
+    "vocab_size": 32768,
+    "d_model": 1024,
+    "n_layers": 24,
+    "n_heads": 16,
+    "n_kv_heads": 4,
+    "max_seq_len": 2048,
+    "rope_theta": 100000.0,
+    "dtype": "bfloat16",
+    "remat": true
+  },
+  "optim": {
+    "lr": 0.0006,
+    "min_lr_ratio": 0.1,
+    "warmup_steps": 1000,
+    "total_steps": 40000,
+    "weight_decay": 0.1,
+    "clip_norm": 1.0
+  }
+}

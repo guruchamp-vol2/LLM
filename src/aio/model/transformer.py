@@ -41,6 +41,7 @@ class ModelConfig:
     experts_per_token: int = 2
     moe_aux_weight: float = 0.01  # weight of the load-balancing loss
     dtype: str = "float32"        # compute dtype; "bfloat16" on TPU. Parameters stay float32.
+    remat: bool = False           # recompute each layer in the backward pass: ~1/3 more compute, far less memory
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads:
@@ -220,7 +221,10 @@ def forward(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | Non
         xs = (p["layers"], None, None)
     else:
         xs = (p["layers"], cache["k"], cache["v"])
-    x, (aux, new_k, new_v) = jax.lax.scan(layer, x, xs)
+    # With remat, only each layer's input is kept for the backward pass; everything inside
+    # the layer (attention scores, MLP activations) is recomputed when gradients need it.
+    body = jax.checkpoint(layer) if cfg.remat and cache is None else layer
+    x, (aux, new_k, new_v) = jax.lax.scan(body, x, xs)
 
     x = rms_norm(x, p["final_norm"], cfg.norm_eps)
     head = p["embed"].T if cfg.tie_embeddings else p["lm_head"]

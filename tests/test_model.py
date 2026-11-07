@@ -137,3 +137,20 @@ def test_bfloat16_compute():
     hi, _, _ = forward(params, _tokens(), TINY)
     assert lo.dtype == jnp.float32 and params["embed"].dtype == jnp.float32
     assert float(jnp.max(jnp.abs(lo - hi))) < 0.1
+
+
+def test_remat_gives_same_loss_and_grads():
+    import dataclasses
+
+    cfg = TINY
+    params = init_params(cfg, jax.random.PRNGKey(0))
+    tok = jax.random.randint(jax.random.PRNGKey(1), (2, 16), 0, cfg.vocab_size)
+    mask = jnp.ones_like(tok)
+
+    def lg(c):
+        return jax.value_and_grad(lambda p: loss_fn(p, tok[:, :-1], tok[:, 1:], mask[:, 1:], c)[0])(params)
+
+    (l1, g1), (l2, g2) = lg(cfg), lg(dataclasses.replace(cfg, remat=True))
+    assert np.allclose(l1, l2, atol=1e-6)
+    for a, b in zip(jax.tree.leaves(g1), jax.tree.leaves(g2)):
+        assert np.allclose(a, b, atol=1e-5)

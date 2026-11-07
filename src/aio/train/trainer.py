@@ -57,6 +57,7 @@ class TrainConfig:
     objective: str = "lm"          # "lm" (pretraining and SFT) or "dpo"
     dpo_beta: float = 0.1
     init_from: str | None = None   # checkpoints folder of an earlier run: start from its newest weights
+    time_limit_s: float | None = None  # save and stop after this many seconds (sessions with a hard cut-off)
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
 
@@ -249,6 +250,7 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     try:
         with _StopFlag() as flag:
             t0, t_tokens = time.time(), 0
+            deadline = time.time() + cfg.time_limit_s if cfg.time_limit_s else None
             while step < cfg.steps:
                 batch = put_batch(data.batch(step, cfg.batch_size, cfg.seq_len, cfg.seed), batch_sharding)
                 state["params"], state["opt"], m = train_step(state["params"], state["opt"], batch, ref)
@@ -281,7 +283,10 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
 
                 if step % cfg.ckpt_every == 0 or step == cfg.steps:
                     save(step)
-                if any_process(flag.stop) or (stop_after is not None and step - start >= stop_after):
+                out_of_time = deadline is not None and time.time() > deadline
+                if out_of_time and main:
+                    log(f"time limit reached at step {step}: saving and stopping (re-run to resume)")
+                if any_process(flag.stop or out_of_time) or (stop_after is not None and step - start >= stop_after):
                     if step % cfg.ckpt_every:
                         save(step)
                     break
