@@ -93,6 +93,28 @@ def test_token_shards_roundtrip(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_mixture_dataset(tmp_path):
+    from aio.data.tokens import MixtureDataset
+    from aio.train.trainer import load_dataset
+
+    for name, value in (("a", 1), ("b", 2)):  # source a is all 1s, source b all 2s
+        with TokenShardWriter(tmp_path / name, vocab_size=100, eot_id=99, tokens_per_shard=10_000) as w:
+            for _ in range(20):
+                w.add([value] * 200)
+    spec = f"{tmp_path / 'a'}=3,{tmp_path / 'b'}=1"
+    mix = load_dataset(spec)
+    assert isinstance(mix, MixtureDataset) and mix.vocab_size == 100
+    b = mix.batch(0, 4000, 16)
+    frac_a = (b[:, 1] == 1).mean()
+    assert 0.72 < frac_a < 0.78                       # 3:1 weights -> 75% from a
+    assert np.array_equal(b, mix.batch(0, 4000, 16))  # deterministic per step (exact resume)
+    assert mix.epochs(mix.n_tokens)[0] > mix.epochs(mix.n_tokens)[1]
+    with TokenShardWriter(tmp_path / "c", vocab_size=50, eot_id=49) as w:
+        w.add([1] * 300)
+    with pytest.raises(ValueError, match="tokenizers"):
+        MixtureDataset(f"{tmp_path / 'a'}=1,{tmp_path / 'c'}=1")
+
+
 def test_checkpoint_roundtrip_and_keep(tmp_path):
     state = {"a": jnp.arange(4.0), "b": {"c": jnp.ones((2, 3), jnp.int32)}}
     for s in (10, 20, 30, 40):

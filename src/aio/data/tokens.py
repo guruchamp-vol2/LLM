@@ -91,3 +91,50 @@ class TokenDataset:
 
     def batch(self, step: int, batch_size: int, seq_len: int, seed: int = 0) -> np.ndarray:
         return self.sample(np.random.default_rng((seed, step)), batch_size, seq_len)
+
+
+class MixtureDataset:
+    """Several token datasets sampled by weight: each row of a batch comes from source i
+    with probability weight_i / sum(weights). This is how the data mix (e.g. 50% web,
+    30% code, 20% maths) is set without rewriting any shards.
+
+    Spec: "DIR=WEIGHT,DIR=WEIGHT,...", e.g. "C:/tok/edu/train=5,C:/tok/github/train=3".
+    """
+
+    def __init__(self, spec: str) -> None:
+        self.parts: list[tuple[str, float]] = []
+        for item in spec.split(","):
+            path, _, w = item.strip().rpartition("=")
+            if not path:
+                raise ValueError(f"mixture items look like DIR=WEIGHT, got {item!r}")
+            self.parts.append((path, float(w)))
+        self.sources = [TokenDataset(p) for p, _ in self.parts]
+        vocab = {s.vocab_size for s in self.sources}
+        if len(vocab) != 1:
+            raise ValueError(f"mixture sources use different tokenizers (vocab sizes {sorted(vocab)})")
+        self.vocab_size, self.eot_id = self.sources[0].vocab_size, self.sources[0].eot_id
+        w = np.array([w for _, w in self.parts], dtype=np.float64)
+        if (w <= 0).any():
+            raise ValueError("mixture weights must be positive")
+        self.probs = w / w.sum()
+
+    @property
+    def n_tokens(self) -> int:
+        return sum(s.n_tokens for s in self.sources)
+
+    def sample(self, rng: np.random.Generator, n: int, seq_len: int) -> np.ndarray:
+        which = rng.choice(len(self.sources), size=n, p=self.probs)
+        out = np.empty((n, seq_len + 1), dtype=np.int32)
+        for k in range(len(self.sources)):
+            rows = np.nonzero(which == k)[0]
+            if len(rows):
+                out[rows] = self.sources[k].sample(rng, len(rows), seq_len)
+        return out
+
+    def batch(self, step: int, batch_size: int, seq_len: int, seed: int = 0) -> np.ndarray:
+        return self.sample(np.random.default_rng((seed, step)), batch_size, seq_len)
+
+    def epochs(self, tokens_seen: int) -> list[float]:
+        """How many times each source has been seen after tokens_seen training tokens
+        (more than ~4 epochs of the same data stops helping)."""
+        return [tokens_seen * p / max(s.n_tokens, 1) for p, s in zip(self.probs, self.sources)]

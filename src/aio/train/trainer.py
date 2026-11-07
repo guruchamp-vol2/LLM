@@ -72,7 +72,12 @@ class TrainConfig:
 
 
 def load_dataset(path: str):
-    """Token shards (a folder with index.json), or a post-training .npz (SFT or DPO pairs)."""
+    """Token shards (a folder with index.json), a weighted mixture of them
+    ("DIR=WEIGHT,DIR=WEIGHT"), or a post-training .npz (SFT or DPO pairs)."""
+    if "=" in path:
+        from ..data.tokens import MixtureDataset
+
+        return MixtureDataset(path)
     p = Path(path)
     if p.suffix == ".npz":
         from ..post.chat import ConversationDataset, PairDataset
