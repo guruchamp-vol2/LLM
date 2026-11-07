@@ -54,7 +54,14 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 - Stage 7, evaluation (`src/aio/eval/`, `scripts/eval_mc.py`): multiple-choice by log-likelihood (acc and per-byte acc_norm) for HellaSwag, ARC-Easy/Challenge and MMLU (files cached in `C:/llm-data/evals`).
   - Base laptop-tiny, 1000 items each, acc_norm: HellaSwag 0.297, ARC-E 0.295, ARC-C 0.224, MMLU 0.244 (chance 0.25). HellaSwag and ARC-E are a bit above chance; the others are at chance, as expected at this size.
   - Not built yet: LLM-as-judge, our own task suites, perplexity-by-domain report.
-- Next: stage 8 pieces that can be built small (tool-call format and execution loop, retrieval), the reward model, and more eval. Bigger models wait for TPU.
+  - Laptop DPO result (stopped at step 300): val DPO loss 0.85, then 0.80, then 0.80. That's worse than the 0.693 starting point, so it didn't help: 6.5M params can't judge UltraFeedback's long answers. Redo on a bigger model.
+- Stage 8, all-in-one layer (started):
+  - Tools (`src/aio/agent/`): tool calls are `<|tool_call|>{json}<|end|>` and results are `<|tool_result|>...<|end|>` (loss on the call, never the result). `calculator` is AST-only and refuses code. `agent.run` loops generate, execute, feed back, and recovers from bad calls. A unit test shows a 0.3M-param model learns to use the calculator on unseen sums (20/20). Lesson: the tokenizer must have seen the tool JSON, or calls are ~50 single-char tokens and fail.
+  - Laptop tool fine-tune: `configs/laptop-tools.json` (20k synthetic calculator chats + 20k smoltalk, from laptop-sft).
+  - Retrieval (`src/aio/retrieval/`): BM25 `SearchIndex` (day-partitioned JSONL, dedup by URL) and `search_tool`. Daily collector `scripts/collect.py` + `configs/sources.json` (Wikipedia daily feed, arXiv cs.CL/cs.LG via rss.arxiv.org, NASA): robots.txt respected, 2 s per-host delay, PII redacted, `--keep-days 60`. Meant for a daily cron on the VPS. export.arxiv.org disallows bots, so use rss.arxiv.org. Index at `C:/llm-data/search-index` (607 docs on 2026-11-06).
+  - Learning from feedback (`src/aio/memory/`): `scripts/chat.py` has `/good`, `/bad`, `/fix <answer>`, with `--feedback` (JSONL log) and `--memory` (corrections index, shown as a system note on similar questions). `scripts/feedback_to_data.py` exports SFT + DPO data plus a review file; never train on feedback without reading it. The 6.5M model ignores memory notes; that needs a bigger model.
+  - Why not "scan the whole web daily": far beyond $0 (one Common Crawl snapshot is hundreds of TB, and daily retraining isn't possible). Retrieval over curated daily sources gives fresh answers instead.
+- Next: teach the model to call `search` (synthetic search conversations from the index, like the calculator), the reward model, more eval. Bigger models wait for TPU.
 
 ## Commands
 - Tests: `python -m pytest -q tests`
