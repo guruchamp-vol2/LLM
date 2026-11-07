@@ -23,9 +23,21 @@ REPO = f"{WORK}/llm"
 results = {"started": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def sh(cmd: str, check: bool = True) -> int:
+DEADLINE = time.time() + 50 * 60  # whole run: free TPU hours are limited, never let a hang burn them
+
+
+def sh(cmd: str, check: bool = True, timeout: float = 15 * 60) -> int:
+    """Run a command; kill it after `timeout` seconds or at the overall deadline (exit code 124)."""
+    left = DEADLINE - time.time()
+    if left < 30:
+        print(f"\n$ {cmd}\n(skipped: past the run deadline)", flush=True)
+        return 124
     print(f"\n$ {cmd}", flush=True)
-    return subprocess.run(cmd, shell=True, check=check).returncode
+    try:
+        return subprocess.run(cmd, shell=True, check=check, timeout=min(timeout, left)).returncode
+    except subprocess.TimeoutExpired:
+        print(f"(killed after {min(timeout, left):.0f}s)", flush=True)
+        return 124
 
 
 def save() -> None:
@@ -39,8 +51,13 @@ try:
 except ImportError:
     sh(f"{sys.executable} -m pip install -q -U 'jax[tpu]'")
 sh(f"{sys.executable} -m pip install -q regex pyarrow")
-out = subprocess.run([sys.executable, "-c", "import jax; print(jax.__version__); print(jax.devices())"],
-                     capture_output=True, text=True)
+try:
+    out = subprocess.run([sys.executable, "-c", "import jax; print(jax.__version__); print(jax.devices())"],
+                         capture_output=True, text=True, timeout=300)
+except subprocess.TimeoutExpired:
+    results["jax"] = "TIMEOUT: jax.devices() did not return in 5 minutes (TPU not reachable?)"
+    save()
+    sys.exit(results["jax"])
 print(out.stdout, out.stderr[-2000:], flush=True)
 results["jax"] = out.stdout.strip()
 save()
