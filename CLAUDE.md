@@ -6,7 +6,8 @@ We're building an all-in-one LLM **from scratch**, with no corners cut. The goal
 - **Budget: $0.** Never suggest paid services or subscriptions.
 - **Laptop:** Windows 11, CPU only (no NVIDIA GPU), 32 GB RAM, Python 3.11, PyTorch CPU installed. Used to build and test everything at small scale.
 - **Small VPS:** 1 vCPU, 1 GB RAM, 25 GB disk. Only good for 24/7 downloads, test runs and hosting a demo, not training.
-- **Google TPU Research Cloud:** accepted. TPUs are free, but storage, disks and egress are not.
+- **Google TPU Research Cloud:** **unconfirmed** (2026-11-06). The user found only the free-trial welcome email, with no TRC acceptance or quota email. Check whether they applied (https://sites.research.google/trc). If accepted, the TPUs are free, but storage, disks and egress are not. Until confirmed, any Google Cloud TPU use would come out of the $300 credit (if the trial even allows TPUs; check IAM & Admin → Quotas).
+- **Kaggle:** free weekly TPU/GPU notebook quota with no billing. This is the $0 fallback for training beyond the laptop.
 - **Google Cloud free trial:** $300 credit, expires 2027-02-04. Not upgraded to paid. Don't buy the "Cloud TPU v5e Fixed Price Subscription."
 - Still unknown: how long TRC access lasts, which TPU types, and whether the clock has started. Don't start the clock until the training code is ready.
 - This folder is inside OneDrive. Keep datasets and checkpoints out of it (see .gitignore) and use a non-synced folder such as `C:\llm-data`.
