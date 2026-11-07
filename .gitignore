@@ -13,3 +13,9 @@ __pycache__/
 *.tmp
 *.npy
 *.bin
+
+# Credentials: never commit
+kaggle.json
+.kaggle/
+*.pem
+.env
