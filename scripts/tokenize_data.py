@@ -36,7 +36,7 @@ def _encode(text: str) -> list[int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="glob of cleaned JSONL files")
+    ap.add_argument("--input", required=True, nargs="+", help="glob(s) of cleaned JSONL files")
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--val-frac", type=float, default=0.005)
@@ -45,7 +45,7 @@ def main() -> None:
     ap.add_argument("--tokens-per-shard", type=int, default=50_000_000)
     args = ap.parse_args()
 
-    files = sorted(glob.glob(args.input))
+    files = sorted({f for g in args.input for f in glob.glob(g)})
     if not files:
         sys.exit(f"no files match {args.input}")
     tok = BPETokenizer.load(args.tokenizer)

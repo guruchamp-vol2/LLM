@@ -154,3 +154,65 @@ def test_remat_gives_same_loss_and_grads():
     assert np.allclose(l1, l2, atol=1e-6)
     for a, b in zip(jax.tree.leaves(g1), jax.tree.leaves(g2)):
         assert np.allclose(a, b, atol=1e-5)
+
+
+def _loss_and_grads(cfg, params, tok):
+    mask = jnp.ones_like(tok)
+    return jax.value_and_grad(lambda p: loss_fn(p, tok[:, :-1], tok[:, 1:], mask[:, 1:], cfg)[0])(params)
+
+
+def _assert_same(a, b, atol=1e-5):
+    (l1, g1), (l2, g2) = a, b
+    assert np.allclose(l1, l2, atol=atol), (l1, l2)
+    for x, y in zip(jax.tree.leaves(g1), jax.tree.leaves(g2)):
+        assert np.allclose(x, y, atol=atol), float(jnp.max(jnp.abs(x - y)))
+
+
+def test_chunked_loss_gives_same_loss_and_grads():
+    import dataclasses
+
+    params = init_params(TINY, jax.random.PRNGKey(0))
+    tok = jax.random.randint(jax.random.PRNGKey(1), (2, 17), 0, TINY.vocab_size)  # 16 positions
+    _assert_same(_loss_and_grads(TINY, params, tok),
+                 _loss_and_grads(dataclasses.replace(TINY, loss_chunk=4), params, tok))
+
+
+SPLASH = ModelConfig(vocab_size=64, d_model=64, n_layers=2, n_heads=4, n_kv_heads=2, max_seq_len=128)
+
+
+def test_splash_attention_matches_plain_attention():
+    """The TPU flash-attention kernel (run in interpret mode on CPU) = plain attention."""
+    import dataclasses
+
+    params = init_params(SPLASH, jax.random.PRNGKey(0))
+    tok = jax.random.randint(jax.random.PRNGKey(1), (2, 129), 0, SPLASH.vocab_size)
+    fast = dataclasses.replace(SPLASH, attention="splash", remat=True, loss_chunk=64)
+    _assert_same(_loss_and_grads(SPLASH, params, tok), _loss_and_grads(fast, params, tok), atol=2e-5)
+
+
+def test_splash_attention_on_4_fake_devices():
+    """Inside a mesh, splash runs per device (shard_map over the batch) and still matches."""
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    script = f"""
+import sys, dataclasses, numpy as np, jax, jax.numpy as jnp
+sys.path.insert(0, {str(root / 'src')!r}); sys.path.insert(0, {str(root / 'tests')!r})
+from jax.sharding import NamedSharding, PartitionSpec as P
+from aio.train.sharding import make_mesh
+from test_model import SPLASH, _loss_and_grads, _assert_same
+from aio.model import init_params
+assert len(jax.devices()) == 4
+params = init_params(SPLASH, jax.random.PRNGKey(0))
+tok = jax.random.randint(jax.random.PRNGKey(1), (4, 129), 0, SPLASH.vocab_size)
+want = _loss_and_grads(SPLASH, params, tok)
+mesh = make_mesh()
+fast = dataclasses.replace(SPLASH, attention="splash")
+with jax.set_mesh(mesh):
+    f = jax.jit(lambda p, t: _loss_and_grads(fast, p, t), in_shardings=(NamedSharding(mesh, P()), NamedSharding(mesh, P("data"))))
+    got = f(params, tok)
+_assert_same(want, got, atol=2e-5)
+"""
+    env = {**os.environ, "XLA_FLAGS": "--xla_force_host_platform_device_count=4", "JAX_PLATFORMS": "cpu"}
+    subprocess.run([sys.executable, "-c", script], check=True, env=env, timeout=900)

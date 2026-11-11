@@ -15,7 +15,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from ..model.transformer import ModelConfig, forward, loss_fn
+from ..model.transformer import ModelConfig, loss_fn, token_logprobs
 
 
 def lm_objective(params, batch, cfg: ModelConfig, ref=None, **_):
@@ -29,9 +29,7 @@ def lm_objective(params, batch, cfg: ModelConfig, ref=None, **_):
 
 def sequence_logprob(params, tokens, mask, cfg: ModelConfig):
     """Sum of log p(token) over masked target positions, per sequence. tokens: (B, T+1)."""
-    logits, _, _ = forward(params, tokens[:, :-1], cfg)
-    logp = jax.nn.log_softmax(logits, axis=-1)
-    tok_lp = jnp.take_along_axis(logp, tokens[:, 1:, None], axis=-1)[..., 0]
+    tok_lp, _ = token_logprobs(params, tokens[:, :-1], tokens[:, 1:], cfg)
     return jnp.sum(tok_lp * mask[:, 1:], axis=-1)
 
 

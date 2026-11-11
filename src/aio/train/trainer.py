@@ -107,7 +107,10 @@ def make_train_step(cfg: TrainConfig):
             (loss, metrics), grads = grad_fn(params, batch, ref)
         else:
             # Average gradients over A micro-batches without holding all their activations.
-            mb = jax.tree.map(lambda a: a.reshape(A, a.shape[0] // A, *a.shape[1:]), batch)
+            # Micro-batch a takes rows a, a + A, a + 2A, ...: the batch is split across devices
+            # in contiguous blocks, so every micro-batch stays spread over all devices (a plain
+            # reshape would put each micro-batch on only 1/A of them).
+            mb = jax.tree.map(lambda a: a.reshape(a.shape[0] // A, A, *a.shape[1:]).swapaxes(0, 1), batch)
 
             def body(carry, micro):
                 g_sum, l_sum, m_sum = carry
@@ -133,6 +136,16 @@ def make_eval_step(cfg: TrainConfig):
         return objective(params, batch, ref)[0]
 
     return step
+
+
+def _peak_memory_gb(device) -> float | None:
+    """Peak accelerator memory in use so far (TPU/GPU), or None where it isn't reported (CPU)."""
+    try:
+        stats = device.memory_stats() or {}
+    except Exception:
+        return None
+    peak = stats.get("peak_bytes_in_use")
+    return round(peak / 2**30, 2) if peak else None
 
 
 _distributed_ready = False
@@ -224,10 +237,17 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
     if ref is not None:
         ref = put_global(ref, shard["params"])
     ref_shard = shard["params"] if ref is not None else None
-    train_step = jax.jit(make_train_step(cfg), donate_argnums=(0, 1),
-                         in_shardings=(shard["params"], shard["opt"], batch_sharding, ref_shard),
-                         out_shardings=(shard["params"], shard["opt"], replicated))
-    eval_step = jax.jit(make_eval_step(cfg), in_shardings=(shard["params"], batch_sharding, ref_shard))
+    def with_mesh(f):
+        # The model reads the mesh while tracing (splash attention runs per device via shard_map).
+        def run(*args):
+            with jax.set_mesh(mesh):
+                return f(*args)
+        return run
+
+    train_step = with_mesh(jax.jit(make_train_step(cfg), donate_argnums=(0, 1),
+                                   in_shardings=(shard["params"], shard["opt"], batch_sharding, ref_shard),
+                                   out_shardings=(shard["params"], shard["opt"], replicated)))
+    eval_step = with_mesh(jax.jit(make_eval_step(cfg), in_shardings=(shard["params"], batch_sharding, ref_shard)))
 
     def evaluate(params) -> float:
         # Fixed held-out batches (seed is independent of the training seed).
@@ -262,6 +282,9 @@ def train(cfg: TrainConfig, log=print, stop_after: int | None = None) -> dict:
                     dt = time.time() - t0
                     rec = {"step": step, **{k: round(v, 5) for k, v in m.items()},
                            "tokens_per_s": round(t_tokens / max(dt, 1e-9)), "tokens_seen": step * tokens_per_step}
+                    mem = _peak_memory_gb(devices[0])
+                    if mem is not None:
+                        rec["peak_mem_gb"] = mem
                     if not math.isfinite(m["loss"]):
                         raise FloatingPointError(f"loss became {m['loss']} at step {step}")
                     extra = "".join(f" | {k} {m[k]:.3f}" for k in ("reward_acc", "margin") if k in m)

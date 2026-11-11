@@ -42,6 +42,8 @@ class ModelConfig:
     moe_aux_weight: float = 0.01  # weight of the load-balancing loss
     dtype: str = "float32"        # compute dtype; "bfloat16" on TPU. Parameters stay float32.
     remat: bool = False           # recompute each layer in the backward pass: ~1/3 more compute, far less memory
+    attention: str = "xla"        # "xla" (plain einsum) or "splash" (TPU flash-attention kernel, training only)
+    loss_chunk: int = 0           # >0: compute the output layer + loss this many positions at a time
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads:
@@ -52,6 +54,8 @@ class ModelConfig:
             raise ValueError("head_dim must be even for RoPE")
         if self.n_experts and not 1 <= self.experts_per_token <= self.n_experts:
             raise ValueError("experts_per_token must be between 1 and n_experts")
+        if self.attention not in ("xla", "splash"):
+            raise ValueError(f"unknown attention {self.attention!r}")
 
     @property
     def head_dim(self) -> int:
@@ -146,6 +150,44 @@ def attention(q, k, v, q_pos, k_pos):
     return out.reshape(B, T, H * Dh)
 
 
+def splash_attention(q, k, v):
+    """Causal grouped-query attention with the Pallas "splash" kernel (flash attention for
+    TPU): the T x T score matrix is never stored, so memory grows with T instead of T^2.
+    Same shapes as attention(); all positions start at 0 (no cache). Off TPU the kernel runs
+    in interpret mode, which is slow but exact, so tests can check it on a laptop.
+
+    The kernel works on one device's data, so on several devices it runs inside shard_map,
+    split along the batch ("data" mesh axis, set by the trainer with jax.set_mesh).
+    """
+    from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as sk
+    from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as sm
+
+    B, T, H, Dh = q.shape
+    KV = k.shape[2]
+    G = H // KV
+    blk = min(512, T)
+    if T % 128 or T % blk:
+        raise ValueError(f"splash attention needs seq_len to be a multiple of 128 (got {T})")
+    kernel = sk.make_splash_mqa_single_device(
+        sm.MultiHeadMask([sm.CausalMask((T, T)) for _ in range(G)]),
+        block_sizes=sk.BlockSizes(block_q=blk, block_kv=blk, block_kv_compute=blk, block_q_dkv=blk,
+                                  block_kv_dkv=blk, block_kv_dkv_compute=blk, block_q_dq=blk, block_kv_dq=blk),
+        interpret=jax.default_backend() != "tpu")
+
+    def local(q, k, v):
+        b = q.shape[0]
+        qg = (q * (1.0 / math.sqrt(Dh))).astype(q.dtype).transpose(0, 2, 1, 3).reshape(b, KV, G, T, Dh)
+        kg, vg = k.transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)      # (b, KV, T, Dh)
+        out = jax.vmap(jax.vmap(kernel))(qg, kg, vg)                      # (b, KV, G, T, Dh)
+        return out.reshape(b, H, T, Dh).transpose(0, 2, 1, 3).reshape(b, T, H * Dh)
+
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh.empty or "data" not in mesh.axis_names or mesh.shape["data"] == 1:
+        return local(q, k, v)
+    spec = jax.sharding.PartitionSpec("data")
+    return jax.shard_map(local, mesh=mesh, in_specs=(spec, spec, spec), out_specs=spec, check_vma=False)(q, k, v)
+
+
 def swiglu(x, w_gate, w_up, w_down):
     return (jax.nn.silu(x @ w_gate) * (x @ w_up)) @ w_down
 
@@ -181,12 +223,8 @@ def init_cache(cfg: ModelConfig, batch: int, max_len: int | None = None) -> dict
     return {"k": jnp.zeros(shape, dt), "v": jnp.zeros(shape, dt)}
 
 
-def forward(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | None = None, start_pos=0):
-    """tokens: (B, T) int. Returns (logits (B, T, vocab) float32, MoE aux loss, updated cache).
-
-    With a cache, the tokens are taken to sit at positions start_pos .. start_pos + T - 1
-    and attend to everything already in the cache.
-    """
+def _trunk(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | None = None, start_pos=0):
+    """Everything but the output layer: (final hidden states, output matrix, aux, cache)."""
     B, T = tokens.shape
     dt = jnp.dtype(cfg.dtype)
     H, KV, Dh = cfg.n_heads, cfg.n_kv_heads, cfg.head_dim
@@ -208,7 +246,11 @@ def forward(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | Non
             ck = jax.lax.dynamic_update_slice(ck, k.astype(ck.dtype), (0, start_pos, 0, 0))
             cv = jax.lax.dynamic_update_slice(cv, v.astype(cv.dtype), (0, start_pos, 0, 0))
             k_all, v_all, k_pos = ck, cv, jnp.arange(ck.shape[1])
-        x = x + attention(q, k_all, v_all, positions, k_pos) @ lp["wo"]
+        if ck is None and cfg.attention == "splash":
+            a = splash_attention(q, k, v)
+        else:
+            a = attention(q, k_all, v_all, positions, k_pos)
+        x = x + a @ lp["wo"]
 
         h = rms_norm(x, lp["mlp_norm"], cfg.norm_eps)
         if cfg.n_experts:
@@ -228,16 +270,50 @@ def forward(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | Non
 
     x = rms_norm(x, p["final_norm"], cfg.norm_eps)
     head = p["embed"].T if cfg.tie_embeddings else p["lm_head"]
-    logits = (x @ head).astype(F32)
     new_cache = None if cache is None else {"k": new_k, "v": new_v}
-    return logits, aux.mean(), new_cache
+    return x, head, aux.mean(), new_cache
+
+
+def forward(params: dict, tokens: jax.Array, cfg: ModelConfig, cache: dict | None = None, start_pos=0):
+    """tokens: (B, T) int. Returns (logits (B, T, vocab) float32, MoE aux loss, updated cache).
+
+    With a cache, the tokens are taken to sit at positions start_pos .. start_pos + T - 1
+    and attend to everything already in the cache.
+    """
+    x, head, aux, new_cache = _trunk(params, tokens, cfg, cache, start_pos)
+    return (x @ head).astype(F32), aux, new_cache
+
+
+def token_logprobs(params: dict, tokens: jax.Array, targets: jax.Array, cfg: ModelConfig):
+    """log p(targets[b, t] | tokens[b, :t+1]), shape (B, T), and the MoE aux loss.
+
+    With cfg.loss_chunk, the logits are made and reduced a chunk of positions at a time and
+    recomputed in the backward pass, so the (B, T, vocab) float32 array (gigabytes with a 32k
+    vocabulary) never exists all at once.
+    """
+    x, head, aux, _ = _trunk(params, tokens, cfg)
+    B, T, D = x.shape
+
+    def one(xc, tc):
+        logits = (xc @ head).astype(F32)
+        picked = jnp.take_along_axis(logits, tc[..., None], axis=-1)[..., 0]
+        return picked - jax.nn.logsumexp(logits, axis=-1)
+
+    c = cfg.loss_chunk
+    if not c or c >= T or T % c:
+        return one(x, targets), aux
+    xs = x.reshape(B, T // c, c, D).swapaxes(0, 1)
+    ts = targets.reshape(B, T // c, c).swapaxes(0, 1)
+    lp = jax.lax.map(jax.checkpoint(lambda a: one(*a)), (xs, ts))     # (T // c, B, c)
+    return lp.swapaxes(0, 1).reshape(B, T), aux
+
+
 
 
 def loss_fn(params: dict, tokens: jax.Array, targets: jax.Array, mask: jax.Array, cfg: ModelConfig):
     """Mean next-token cross-entropy over positions where mask is 1, plus the MoE balance loss."""
-    logits, aux, _ = forward(params, tokens, cfg)
-    logp = jax.nn.log_softmax(logits, axis=-1)
-    nll = -jnp.take_along_axis(logp, targets[..., None], axis=-1)[..., 0]
+    lp, aux = token_logprobs(params, tokens, targets, cfg)
+    nll = -lp
     mask = mask.astype(F32)
     ce = jnp.sum(nll * mask) / jnp.maximum(mask.sum(), 1.0)
     total = ce + cfg.moe_aux_weight * aux if cfg.n_experts else ce
